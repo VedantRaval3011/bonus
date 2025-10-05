@@ -29,8 +29,8 @@ interface CombinedSummary {
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
-    const staffFile = formData.get("staff") as File;
-    const workerFile = formData.get("worker") as File;
+    const staffFile = formData.get("staffTulsi") as File;
+    const workerFile = formData.get("workerTulsi") as File;
 
     if (!staffFile) {
       return NextResponse.json(

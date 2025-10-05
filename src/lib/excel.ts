@@ -2,14 +2,185 @@ import * as ExcelJS from "exceljs";
 import { Employee, MonthlyData, BonusCalculation } from "./types";
 
 function toNumber(cell: ExcelJS.Cell): number {
-  const raw = cell.result ?? cell.value; // prefer calculated result
-  if (typeof raw === "number") return raw; // number – return as-is
-  if (raw instanceof Date) return +raw; // date – epoch millis → number
-  const n = Number(String(raw).trim()); // string or others
-  return isFinite(n) ? n : 0; // fallback if NaN
+  const raw = cell.result ?? cell.value;
+  if (typeof raw === "number") return raw;
+  if (raw instanceof Date) return +raw;
+  const n = Number(String(raw).trim());
+  return isFinite(n) ? n : 0;
 }
 
 export class ExcelProcessor {
+  private static shouldIncludeOctober(monthlyData: MonthlyData[]): boolean {
+    // Find AUG-25 salary
+    const augSalary = monthlyData.find(
+      (md) =>
+        md.month.toUpperCase().includes("AUG-25") ||
+        md.month.toUpperCase() === "AUG-25"
+    );
+
+    // If AUG-25 exists and has salary > 0, include October
+    // If AUG-25 doesn't exist or is 0, exclude October
+    return augSalary ? augSalary.salary > 0 : false;
+  }
+
+  // ===== MONTH KEY NORMALIZATION =====
+  private static normalizeMonthKey(sheetName: string): string {
+    const s = String(sheetName || "")
+      .toUpperCase()
+      .trim();
+    const m =
+      s.match(/^([A-Z]+)\s*[-/]\s*(\d{2,4})/) ||
+      s.match(/^([A-Z]+)\s+(\d{2,4})/);
+    if (!m) return s.slice(0, 6);
+    const mon = m[1];
+    const yr = m[2];
+    const map: Record<string, string> = {
+      JAN: "JAN",
+      JANUARY: "JAN",
+      FEB: "FEB",
+      FEBRUARY: "FEB",
+      MAR: "MAR",
+      MARCH: "MAR",
+      APR: "APR",
+      APRIL: "APR",
+      MAY: "MAY",
+      JUN: "JUN",
+      JUNE: "JUN",
+      JUL: "JUL",
+      JULY: "JUL",
+      AUG: "AUG",
+      AUGUST: "AUG",
+      SEP: "SEP",
+      SEPT: "SEP",
+      SEPTEMBER: "SEP",
+      OCT: "OCT",
+      OCTOBER: "OCT",
+      NOV: "NOV",
+      NOVEMBER: "NOV",
+      DEC: "DEC",
+      DECEMBER: "DEC",
+    };
+    const m3 = map[mon] || mon.slice(0, 3);
+    const yy = yr.length === 4 ? yr.slice(2) : yr;
+    return `${m3}-${yy}`;
+  }
+
+  // Parse Due Voucher List
+  static async parseDueVoucherList(
+    buffer: ArrayBuffer
+  ): Promise<
+    Map<string, { alreadyPaid: number; unpaid: number; dept: string }>
+  > {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      const dueVoucherMap = new Map<
+        string,
+        { alreadyPaid: number; unpaid: number; dept: string }
+      >();
+      const worksheet = workbook.getWorksheet("Sheet1");
+      if (!worksheet) return dueVoucherMap;
+
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= 1) return;
+        const empCode = row.getCell(2).value?.toString().trim();
+        const dept = row.getCell(3).value?.toString().trim();
+        const category = row.getCell(4).value?.toString().trim()?.toUpperCase();
+        const dueVC = toNumber(row.getCell(6));
+
+        if (!empCode || !category || dueVC === 0) return;
+
+        if (!dueVoucherMap.has(empCode)) {
+          dueVoucherMap.set(empCode, {
+            alreadyPaid: 0,
+            unpaid: 0,
+            dept: dept || "",
+          });
+        }
+        const entry = dueVoucherMap.get(empCode)!;
+        if (category === "A") entry.alreadyPaid += dueVC;
+        else if (category === "U") entry.unpaid += dueVC;
+      });
+
+      console.log(`Parsed ${dueVoucherMap.size} Due Voucher entries`);
+      return dueVoucherMap;
+    } catch (error) {
+      console.error("Error parsing Due Voucher file:", error);
+      return new Map();
+    }
+  }
+
+  // Parse Loan Deduction file
+  static async parseLoanDeduction(
+    buffer: ArrayBuffer
+  ): Promise<Map<string, number>> {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      const loanMap = new Map<string, number>();
+
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet) return loanMap;
+
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= 1) return; // Skip header
+
+        const empCode = row.getCell(2).value?.toString().trim(); // Column B: EMP. ID
+        const loanAmount = toNumber(row.getCell(7)); // Column G: DEDUCTION LOAN FOR BONUS
+
+        if (empCode && loanAmount > 0) {
+          loanMap.set(empCode, loanAmount);
+        }
+      });
+
+      console.log(`Parsed ${loanMap.size} loan deduction entries`);
+      return loanMap;
+    } catch (error) {
+      console.error("Error parsing Loan Deduction file:", error);
+      return new Map();
+    }
+  }
+
+  // Parse Actual Percentage Bonus Data
+  static async parseActualPercentage(
+    buffer: ArrayBuffer
+  ): Promise<Map<string, number>> {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      const percentageMap = new Map<string, number>();
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet) return percentageMap;
+
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= 1) return;
+        const rawCode = row.getCell(2).value;
+        const empCode = String(Number(String(rawCode).trim()));
+        const percentage = toNumber(row.getCell(5));
+        if (empCode && percentage > 0) percentageMap.set(empCode, percentage);
+      });
+      return percentageMap;
+    } catch (error) {
+      console.error("Error parsing Actual Percentage file:", error);
+      return new Map();
+    }
+  }
+
+  private static getFinalDepartment(employee: Employee): string {
+    // Get the most recent month's department
+    if (!employee.monthlyData || employee.monthlyData.length === 0) {
+      return employee.department;
+    }
+
+    // Sort by month and get the latest one
+    const sorted = [...employee.monthlyData].sort((a, b) => {
+      // Simple string comparison works for our month format (e.g., "SEP-25" > "AUG-25")
+      return b.month.localeCompare(a.month);
+    });
+
+    return sorted[0].department || employee.department;
+  }
+
   // Parse Staff.xlsx - Extract from multiple monthly sheets
   static async parseStaffFile(
     buffer: ArrayBuffer
@@ -18,7 +189,6 @@ export class ExcelProcessor {
       const workbook = new ExcelJS.Workbook();
       const employeeMap = new Map<string, Employee>();
 
-      // Validate buffer
       if (!buffer || buffer.byteLength === 0) {
         console.error("Invalid or empty staff file buffer");
         return { employees: [], summary: null };
@@ -30,95 +200,144 @@ export class ExcelProcessor {
         workbook.worksheets.map((ws) => ws.name)
       );
 
-      // Process each monthly sheet (sheets ending with "O")
       workbook.worksheets.forEach((worksheet) => {
         const sheetName = worksheet.name;
-
-        // Filter for monthly staff sheets (they end with "O")
         if (!sheetName.includes("-") || !sheetName.endsWith(" O")) {
           console.log(`Skipping non-staff sheet: ${sheetName}`);
           return;
         }
-
         console.log(`Processing staff sheet: ${sheetName}`);
-
-        // Process each row to get calculated values from formulas
         let processedCount = 0;
+        let skippedCount = 0;
 
         worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-          // Skip header rows (1-3)
           if (rowNumber <= 3) return;
 
-          const empId = row.getCell(2).value?.toString().trim(); // Column B: EMP. ID
-          const dept = row.getCell(3).value?.toString().trim() || "S"; // Column C: DEPT
-          const name = row.getCell(5).value?.toString().trim(); // Column E: EMPLOYEE NAME
-
-          // Use Column O (SALARY1) which is the calculated working salary
-          const salaryCell = row.getCell(15); // Column O: SALARY1
+          const empId = row.getCell(2).value?.toString().trim();
+          const dept = row.getCell(3).value?.toString().trim() || "S";
+          const name = row.getCell(5).value?.toString().trim();
+          const salaryCell = row.getCell(15);
           let salary = 0;
+          if (salaryCell.result !== undefined) salary = toNumber(salaryCell);
+          else if (salaryCell.value !== undefined)
+            salary = toNumber(salaryCell);
 
-          // Handle both calculated values and raw numbers
-          if (salaryCell.result !== undefined) {
-            salary = toNumber(salaryCell); // Remove const declaration
-          } else if (salaryCell.value !== undefined) {
-            salary = toNumber(salaryCell); // Remove const declaration
+          const STAFF_DOJ_COL = 33;
+          const dojRaw = row.getCell(STAFF_DOJ_COL).value;
+
+          const dojText = String(dojRaw ?? "")
+            .trim()
+            .toUpperCase();
+          const empIdUpper = (empId || "").toUpperCase();
+          const isNValue =
+            dojText === "N" || empIdUpper === "N" || empIdUpper.startsWith("N");
+          const isNotApplicable =
+            dojText === "NA" ||
+            dojText === "N.A" ||
+            dojText === "N.A." ||
+            dojText === "N/A" ||
+            dojText === "";
+
+          // If DOJ is N/A (but not "N"), skip this row completely
+          if (isNotApplicable && !isNValue) {
+            skippedCount++;
+            console.log(
+              `⏭️ Skipping staff ${empId} - ${name} (DOJ: N/A) in sheet ${sheetName}`
+            );
+            return;
           }
 
-          const doj = ExcelProcessor.parseDate(row.getCell(33).value); // Column AG: DOJ
+          // Handle "N" employees/DOJ specially
+          let doj: Date | null;
+          if (isNValue) {
+            doj = new Date("2020-01-01"); // Default date for "N" employees
+            console.log(
+              `📝 Processing "N" employee ${empId} - ${name} in sheet ${sheetName}`
+            );
+          } else {
+            // Parse DOJ normally
+            doj =
+              ExcelProcessor.parseDate?.(dojRaw) ??
+              (dojRaw instanceof Date ? dojRaw : null);
 
-          console.log(
-            `Row ${rowNumber}: empId=${empId}, name=${name}, salary=${salary}`
-          );
+            // Validate parsed date
+            if (!(doj instanceof Date) || isNaN(doj.getTime())) {
+              skippedCount++;
+              console.log(
+                `⏭️ Skipping staff ${empId} - ${name} (Invalid DOJ: ${dojRaw}) in sheet ${sheetName}`
+              );
+              return;
+            }
+          }
 
-          // Skip rows with invalid data
+          // Skip if other critical data is missing
+
           if (
             !empId ||
             empId === "0" ||
             !name ||
-            name.toLowerCase() === "total" ||
-            empId.toLowerCase() === "total" ||
-            salary <= 0
+            name.toLowerCase() === "total"
           ) {
-            console.log(`❌ Skipping row ${rowNumber}: invalid data`);
-            return;
+            return processedCount;
+          }
+          if (!isNValue && salary === 0) {
+            return processedCount;
           }
 
-          console.log(
-            `✅ Valid staff employee: ID=${empId}, Name=${name}, Dept=${dept}, Salary=${salary}`
-          );
-          processedCount++;
+          // Add to employee map (only if DOJ is valid and not N/A)
+          // Create a unique key for the employee map
+          // For "N" employees, use name as part of the key to keep them unique
+          const mapKey =
+            empId === "N" || empId.toUpperCase() === "N" ? `N_${name}` : empId;
 
-          if (!employeeMap.has(empId)) {
-            employeeMap.set(empId, {
-              empId,
+          // Add to employee map (only if DOJ is valid and not N/A)
+          if (!employeeMap.has(mapKey)) {
+            const finalDept = isNValue ? "N" : dept;
+
+            employeeMap.set(mapKey, {
+              empId: empId, // Keep original empId as "N"
               name,
-              department: dept,
+              department: finalDept,
               doj,
               salary: 0,
               monthlyData: [],
             });
           }
 
-          const employee = employeeMap.get(empId)!;
-          if (!employee.monthlyData) {
-            employee.monthlyData = [];
+          if (isNValue || salary > 0) {
+            const employee = employeeMap.get(mapKey)!;
+            if (!employee.monthlyData) employee.monthlyData = [];
+            const monthKey = ExcelProcessor.normalizeMonthKey(sheetName);
+            const monthDept =
+              empId === "N" || String(dojRaw).trim().toUpperCase() === "N"
+                ? "N"
+                : dept;
+
+            employee.monthlyData.push({
+              month: monthKey,
+              salary, // Can be 0 for N employees
+              department: monthDept,
+            });
           }
-          employee.monthlyData.push({
-            month: sheetName,
-            salary: salary,
-          });
+
+          const employee = employeeMap.get(mapKey)!;
+          // Update employee's primary department
+          const currentDept =
+            empId === "N" || String(dojRaw).trim().toUpperCase() === "N"
+              ? "N"
+              : dept;
+          employee.department = currentDept;
         });
 
         console.log(
-          `Processed ${processedCount} staff employees from sheet: ${sheetName}`
+          `Processed ${processedCount} staff employees, skipped ${skippedCount} (N/A DOJ) from sheet: ${sheetName}`
         );
       });
 
       const result = Array.from(employeeMap.values());
-      console.log(`✅ Total parsed staff employees: ${result.length}`);
+      console.log(`✅ Total valid staff employees: ${result.length}`);
       const staffSummary = ExcelProcessor.calculateStaffSummary(result);
       console.log("Staff Summary:", staffSummary);
-
       return { employees: result, summary: staffSummary };
     } catch (error) {
       console.error("Error parsing staff file:", error);
@@ -126,6 +345,7 @@ export class ExcelProcessor {
     }
   }
 
+  // ============= COMPLETE parseWorkerFile METHOD =============
   static async parseWorkerFile(
     buffer: ArrayBuffer
   ): Promise<{ employees: Employee[]; summary: any }> {
@@ -133,7 +353,6 @@ export class ExcelProcessor {
       const workbook = new ExcelJS.Workbook();
       const employeeMap = new Map<string, Employee>();
 
-      // Validate buffer
       if (!buffer || buffer.byteLength === 0) {
         console.error("Invalid or empty worker file buffer");
         return { employees: [], summary: null };
@@ -145,97 +364,163 @@ export class ExcelProcessor {
         workbook.worksheets.map((ws) => ws.name)
       );
 
-      // Process each monthly sheet (sheets ending with "W")
       workbook.worksheets.forEach((worksheet) => {
         const sheetName = worksheet.name;
-
-        // Filter for monthly worker sheets (they end with "W")
         if (!sheetName.includes("-") || !sheetName.endsWith(" W")) {
           console.log(`Skipping non-worker sheet: ${sheetName}`);
           return;
         }
-
         console.log(`Processing worker sheet: ${sheetName}`);
-
         let processedCount = 0;
+        let skippedCount = 0;
 
         worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-          // Skip header rows (1-2)
           if (rowNumber <= 2) return;
 
-          const empId = row.getCell(2).value?.toString().trim(); // Column B: EMP. ID
-          const dept = row.getCell(3).value?.toString().trim() || "W"; // Column C: DEPT
-          const name = row.getCell(4).value?.toString().trim(); // Column D: EMPLOYEE NAME
-
-          // Use Column I (Salary1) which is the calculated monthly salary
-          const salaryCell = row.getCell(9); // Column I: Salary1
+          const empId = row.getCell(2).value?.toString().trim();
+          const dept = row.getCell(3).value?.toString().trim() || "W";
+          const name = row.getCell(4).value?.toString().trim();
+          const salaryCell = row.getCell(9);
           let salary = 0;
+          if (salaryCell.result !== undefined) salary = toNumber(salaryCell);
+          else if (salaryCell.value !== undefined)
+            salary = toNumber(salaryCell);
 
-          // Handle both calculated values and raw numbers - FIX: Remove const declarations
-          if (salaryCell.result !== undefined) {
-            salary = toNumber(salaryCell); // ✅ Fixed - assign to outer variable
-          } else if (salaryCell.value !== undefined) {
-            salary = toNumber(salaryCell); // ✅ This was already correct
+          const WORKER_DOJ_COL = 26;
+          const dojRaw = row.getCell(WORKER_DOJ_COL).value;
+
+          // CHECK FOR N/A DOJ VALUES OR N EMPLOYEE ID
+          const dojText = String(dojRaw ?? "")
+            .trim()
+            .toUpperCase();
+          const empIdUpper = (empId || "").toUpperCase();
+          const isNValue =
+            dojText === "N" || empIdUpper === "N" || empIdUpper.startsWith("N");
+          const isNotApplicable =
+            dojText === "NA" ||
+            dojText === "N.A" ||
+            dojText === "N.A." ||
+            dojText === "N/A" ||
+            dojText === "";
+
+          // If DOJ is N/A (but not "N"), skip this row completely
+          if (isNotApplicable && !isNValue) {
+            skippedCount++;
+            console.log(
+              `⏭️ Skipping worker ${empId} - ${name} (DOJ: N/A) in sheet ${sheetName}`
+            );
+            return;
           }
 
-          // DOJ is in Column Z (26) based on Excel structure
-          const doj = ExcelProcessor.parseDate(row.getCell(26).value); // Column Z: DOJ
+          // Handle "N" employees/DOJ specially
+          let doj: Date | null;
+          if (isNValue) {
+            doj = new Date("2020-01-01"); // Default date for "N" employees
+            console.log(
+              `📝 Processing "N" worker ${empId} - ${name} in sheet ${sheetName}`
+            );
+          } else {
+            // Parse DOJ normally
+            doj =
+              ExcelProcessor.parseDate?.(dojRaw) ??
+              (dojRaw instanceof Date ? dojRaw : null);
 
-          console.log(
-            `Row ${rowNumber}: empId=${empId}, name=${name}, salary=${salary}`
-          );
+            // Validate parsed date
+            if (!(doj instanceof Date) || isNaN(doj.getTime())) {
+              skippedCount++;
+              console.log(
+                `⏭️ Skipping worker ${empId} - ${name} (Invalid DOJ: ${dojRaw}) in sheet ${sheetName}`
+              );
+              return;
+            }
+          }
 
-          // Skip rows with invalid data
+          // Get CASH SALARY column (column N = 14)
+          const cashSalaryCell = row.getCell(14);
+          const cashSalary = cashSalaryCell.value?.toString().trim() || "";
+          const isCashSalary = cashSalary.length > 0;
+
+          // Skip if other critical data is missing
           if (
             !empId ||
             empId === "0" ||
             !name ||
             name.toLowerCase() === "total" ||
-            empId.toLowerCase() === "total" ||
-            salary <= 0
+            empId.toLowerCase() === "total"
           ) {
-            console.log(`❌ Skipping row ${rowNumber}: invalid data`);
             return;
           }
 
-          console.log(
-            `✅ Valid worker employee: ID=${empId}, Name=${name}, Dept=${dept}, Salary=${salary}`
-          );
+          // MODIFIED: For non-N employees, skip if salary is 0
+          // For N employees, allow them through even with 0 salary
+          if (!isNValue && salary <= 0) {
+            return;
+          }
+
           processedCount++;
 
-          if (!employeeMap.has(empId)) {
-            employeeMap.set(empId, {
-              empId,
+          // Add to employee map (always include N employees)
+          const mapKey =
+            empId === "N" || empId.toUpperCase() === "N" ? `N_${name}` : empId;
+
+          // Add to employee map (always include N employees)
+          if (!employeeMap.has(mapKey)) {
+            // Assign department "N" if empId is "N" or DOJ is "N"
+            const finalDept = isNValue ? "N" : dept;
+
+            employeeMap.set(mapKey, {
+              empId: empId, // Keep original empId as "N"
               name,
-              department: dept,
+              department: finalDept,
               doj,
               salary: 0,
               monthlyData: [],
+              isCashSalary: false,
             });
           }
 
-          const employee = employeeMap.get(empId)!;
-          if (!employee.monthlyData) {
-            employee.monthlyData = [];
+          const employee = employeeMap.get(mapKey)!;
+
+          // Update cash salary flag if any month has cash salary
+          if (isCashSalary) {
+            employee.isCashSalary = true;
           }
-          employee.monthlyData.push({
-            month: sheetName,
-            salary: salary,
-          });
+
+          if (!employee.monthlyData) employee.monthlyData = [];
+          const monthKey = ExcelProcessor.normalizeMonthKey(sheetName);
+
+          // MODIFIED: Add monthly data for N employees even with 0 salary
+          // For regular employees, only add if salary > 0
+          if (isNValue || salary > 0) {
+            // Use department "N" for monthly data if applicable
+            const monthDept =
+              empId === "N" || String(dojRaw).trim().toUpperCase() === "N"
+                ? "N"
+                : dept;
+
+            employee.monthlyData.push({
+              month: monthKey,
+              salary, // Can be 0 for N employees
+              department: monthDept,
+            });
+          }
+
+          const currentDept =
+            empId === "N" || String(dojRaw).trim().toUpperCase() === "N"
+              ? "N"
+              : dept;
+          employee.department = currentDept;
         });
 
         console.log(
-          `Processed ${processedCount} worker employees from sheet: ${sheetName}`
+          `Processed ${processedCount} worker employees, skipped ${skippedCount} (N/A DOJ) from sheet: ${sheetName}`
         );
       });
 
       const result = Array.from(employeeMap.values());
-      console.log(`✅ Total parsed worker employees: ${result.length}`);
-
-      // Calculate worker summary
+      console.log(`✅ Total valid worker employees: ${result.length}`);
       const workerSummary = ExcelProcessor.calculateWorkerSummary(result);
       console.log("Worker Summary:", workerSummary);
-
       return { employees: result, summary: workerSummary };
     } catch (error) {
       console.error("Error parsing worker file:", error);
@@ -246,126 +531,88 @@ export class ExcelProcessor {
   // Parse HR Comparison File
   static async parseHRComparisonFile(
     buffer: ArrayBuffer
-  ): Promise<Map<string, { bonus: number; department: string }>> {
+  ): Promise<Map<string, any>> {
     try {
       const workbook = new ExcelJS.Workbook();
-      const bonusMap = new Map<string, { bonus: number; department: string }>();
-
-      // Validate buffer
-      if (!buffer || buffer.byteLength === 0) {
-        console.error("Invalid or empty HR comparison file buffer");
-        return bonusMap;
-      }
-
       await workbook.xlsx.load(buffer);
-      console.log(
-        "HR Comparison sheet names:",
-        workbook.worksheets.map((ws) => ws.name)
-      );
+      const hrMap = new Map();
 
-      // Validate that workbook has worksheets
-      if (!workbook.worksheets || workbook.worksheets.length === 0) {
-        console.log("No worksheets found in HR comparison file");
-        return bonusMap;
-      }
+      ["Staff", "Worker"].forEach((sheetName) => {
+        const worksheet = workbook.getWorksheet(sheetName);
+        if (!worksheet) return;
 
-      // Parse all department sheets
-      workbook.worksheets.forEach((worksheet) => {
-        const sheetName = worksheet.name;
+        worksheet.eachRow((row, rowNumber) => {
+          if (rowNumber <= 2) return;
+          const empCode = row.getCell(2).value?.toString().trim();
+          if (!empCode) return;
+          const dept =
+            row.getCell(3).value?.toString().trim() || sheetName.charAt(0);
+          const salary12 = toNumber(row.getCell(17));
+          const gross = toNumber(row.getCell(18));
+          const register = toNumber(row.getCell(19));
+          const dueVC = toNumber(row.getCell(20));
+          const finalRTGS = toNumber(row.getCell(21));
 
-        console.log(`Processing HR comparison sheet: ${sheetName}`);
-
-        // Convert worksheet to array format
-        const data: any[][] = [];
-        worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-          const rowData: any[] = [];
-          row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-            rowData[colNumber - 1] = cell.value;
+          hrMap.set(empCode, {
+            bonus: finalRTGS,
+            department: dept,
+            grossSal: gross,
+            gross02: gross,
+            register,
+            actual: finalRTGS,
+            unpaid: dueVC,
+            reim: 0,
           });
-          data[rowNumber - 1] = rowData;
         });
-
-        // Find the header row
-        let headerRowIndex = -1;
-        for (let i = 0; i < Math.min(data.length, 10); i++) {
-          const row = data[i];
-          if (row && (row[1] === "EMP Code" || row[1] === "EMP. ID")) {
-            headerRowIndex = i;
-            break;
-          }
-        }
-
-        if (headerRowIndex === -1) return;
-
-        // Process data rows
-        for (let i = headerRowIndex + 1; i < data.length; i++) {
-          const row = data[i];
-          if (!row || !row[1] || !row[3]) continue; // Skip if no EMP Code or Name
-
-          const empId = row[1]?.toString().trim();
-          const department = row[2]?.toString().trim() || sheetName.charAt(0);
-
-          // Find Final RTGS column (varies by sheet structure)
-          let finalRTGS = 0;
-          // Check common Final RTGS column positions
-          const possibleColumns = [18, 19, 20, 21, 22, 23]; // Columns S, T, U, V, W, X
-          for (const col of possibleColumns) {
-            if (row[col] && parseFloat(row[col]) > 0) {
-              finalRTGS = parseFloat(row[col]);
-              break;
-            }
-          }
-
-          if (empId && finalRTGS > 0) {
-            bonusMap.set(empId, {
-              bonus: finalRTGS,
-              department: department,
-            });
-          }
-        }
       });
 
-      console.log(`Parsed ${bonusMap.size} HR bonus records`);
-      return bonusMap;
+      console.log(`✅ Parsed ${hrMap.size} HR entries from comparison file`);
+      return hrMap;
     } catch (error) {
-      console.error("Error parsing HR comparison file:", error);
+      console.error("❌ Error parsing HR comparison file:", error);
       return new Map();
     }
   }
 
-  // Generate Final Bonus Excel with department-wise separation and formulas
+  // Generate Final Bonus Excel
   static async generateFinalBonusExcel(
     calculations: BonusCalculation[],
     staffSummary?: any,
-    workerSummary?: any
+    workerSummary?: any,
+    hrMonthlyTotals?: Map<string, number>,
+    staffBuffer?: ArrayBuffer, // ADD THIS
+    workerBuffer?: ArrayBuffer
   ): Promise<ArrayBuffer> {
     try {
       const workbook = new ExcelJS.Workbook();
 
-      // Validate input
       if (!Array.isArray(calculations) || calculations.length === 0) {
         console.error("Invalid or empty calculations array");
-        // Create empty workbook with message
         const worksheet = workbook.addWorksheet("Error");
         worksheet.getCell("A1").value =
           "No data available for bonus calculations";
         return await workbook.xlsx.writeBuffer();
       }
 
-      // Group by departments
       const departments = this.groupByDepartments(calculations);
       console.log("Departments found:", Object.keys(departments));
 
-      // Generate separate sheets for each department
       for (const dept of Object.keys(departments)) {
         const deptCalculations = departments[dept];
         const isStaff =
           dept === "S" ||
+          dept === "N" || // Add "N" department
           dept === "Sci Prec-" ||
           dept === "NRTM" ||
           dept === "Sci Prec Life.-";
-
-        let sheetName = dept === "S" ? "Staff" : dept === "W" ? "Worker" : dept;
+        let sheetName =
+          dept === "S"
+            ? "Staff"
+            : dept === "W"
+            ? "Worker"
+            : dept === "N"
+            ? "N (Special Cases)"
+            : dept;
 
         if (isStaff) {
           await this.generateStaffSheet(
@@ -384,10 +631,13 @@ export class ExcelProcessor {
         }
       }
 
-      // Generate Summary Sheet
-      await this.generateSummarySheet(workbook, departments);
-
-      // Generate Salary Summary Sheet
+      await this.generateSummarySheet(
+        workbook,
+        departments,
+        hrMonthlyTotals,
+        staffBuffer, // ADD THIS
+        workerBuffer // ADD THIS
+      );
       if (staffSummary && workerSummary) {
         await this.generateSalarySummarySheet(
           workbook,
@@ -397,51 +647,81 @@ export class ExcelProcessor {
       }
 
       return await workbook.xlsx.writeBuffer();
-
-      return await workbook.xlsx.writeBuffer();
     } catch (error) {
       console.error("Error generating final bonus excel:", error);
       throw error;
     }
   }
 
-  private static groupByDepartments(calculations: BonusCalculation[]): {
-    [key: string]: BonusCalculation[];
-  } {
-    const departments: { [key: string]: BonusCalculation[] } = {};
+  private static recalculateForDepartment(
+    calc: BonusCalculation,
+    dept: string
+  ): BonusCalculation {
+    // Filter monthly data for this department only
+    const deptMonthlyData = (calc.monthlyData || []).filter(
+      (md) => md.department === dept
+    );
 
-    // Validate calculations array
-    if (!Array.isArray(calculations)) {
-      console.error("Calculations is not an array:", typeof calculations);
-      return departments;
-    }
+    // Recalculate total gross salary for this department
+    const deptGrossSalary = deptMonthlyData.reduce(
+      (sum, md) => sum + (md.salary || 0),
+      0
+    );
 
+    return {
+      ...calc,
+      department: dept,
+      monthlyData: deptMonthlyData,
+      totalGrossSalary: Math.round(deptGrossSalary),
+      // Note: Other fields like register, bonus, etc. would need recalculation
+      // based on the department-specific gross salary
+    };
+  }
+
+  private static groupByDepartments(
+    calculations: BonusCalculation[]
+  ): Record<string, BonusCalculation[]> {
+    const departments: Record<string, BonusCalculation[]> = {};
     calculations.forEach((calc) => {
-      // Debug logging
-      console.log(
-        `Grouping employee ${calc.empId} - Department: "${calc.department}"`
-      );
+      if (!calc) return;
 
-      let dept = calc.department?.trim();
-
-      // Handle empty or undefined department
-      if (!dept || dept === "" || dept === "null" || dept === "undefined") {
-        // Try to determine department from employee ID pattern
-        const empIdNum = parseInt(calc.empId);
-        if (!isNaN(empIdNum) && empIdNum <= 500) {
-          dept = "S"; // Staff
-        } else {
-          dept = "W"; // Worker
-        }
+      // Special handling for "N" department employees
+      if (calc.department === "N" || calc.empId === "N") {
+        if (!departments["N"]) departments["N"] = [];
+        const deptCalc = this.recalculateForDepartment(calc, "N");
+        departments["N"].push(deptCalc);
+        return;
       }
 
-      if (!departments[dept]) {
-        departments[dept] = [];
+      // Handle employees with empty monthlyData
+      if (!calc.monthlyData || calc.monthlyData.length === 0) {
+        const dept = calc.department || "N";
+        if (!departments[dept]) departments[dept] = [];
+        const deptCalc = this.recalculateForDepartment(calc, dept);
+        departments[dept].push(deptCalc);
+        return;
       }
-      departments[dept].push(calc);
+
+      // For other employees, group by departments found in monthly data
+      const employeeDepts = new Set<string>();
+      calc.monthlyData.forEach((md) => {
+        if (md.department) employeeDepts.add(md.department);
+      });
+
+      // If no departments found in monthly data, use the employee's primary department
+      if (employeeDepts.size === 0) {
+        const dept = calc.department || "N";
+        if (!departments[dept]) departments[dept] = [];
+        const deptCalc = this.recalculateForDepartment(calc, dept);
+        departments[dept].push(deptCalc);
+      } else {
+        employeeDepts.forEach((dept) => {
+          if (!departments[dept]) departments[dept] = [];
+          const deptCalc = this.recalculateForDepartment(calc, dept);
+          departments[dept].push(deptCalc);
+        });
+      }
     });
-
-    console.log("Final departments:", Object.keys(departments));
     return departments;
   }
 
@@ -452,15 +732,12 @@ export class ExcelProcessor {
     dept: string
   ): Promise<void> {
     const worksheet = workbook.addWorksheet(sheetName);
-
-    const title = `DIWALI BONUS LIST FROM NOVEMBER-2024 TO OCTOBER-2025 - INDIANA ${sheetName.toUpperCase()}`;
-
+    const title = `DIWALI BONUS LIST FROM NOVEMBER-2024 TO OCTOBER-2025 (2024-2025) INDIANA BOYS ${sheetName.toUpperCase()}`;
     const headers = [
-      "Sr.No.",
+      "SR. No.",
       "EMP Code",
-      "Deptt.",
-      "EMP. NAME",
-      "%",
+      "Emp Name",
+      "DOJ",
       "NOV-24",
       "DEC-24",
       "JAN-25",
@@ -473,17 +750,21 @@ export class ExcelProcessor {
       "AUG-25",
       "SEP-25",
       "OCT-25",
-      "GROSS SAL.",
-      "GROSS 02",
+      "Gross Salary",
+      "Gross 2",
       "Register",
+      "Already Paid",
+      "Unpaid",
+      "Eligible",
+      "After V",
+      "Percentage",
       "Actual",
-      "Un Paid",
+      "Reim",
+      "Loan",
       "Final RTGS",
-      "Reim.",
     ];
 
-    // Add title
-    worksheet.mergeCells("A1:X1");
+    worksheet.mergeCells("A1:AA1");
     const titleCell = worksheet.getCell("A1");
     titleCell.value = title;
     titleCell.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
@@ -494,15 +775,13 @@ export class ExcelProcessor {
     };
     titleCell.alignment = { horizontal: "center", vertical: "middle" };
 
-    // Add empty row
     worksheet.getRow(2).height = 15;
 
-    // Add headers
     const headerRow = worksheet.getRow(3);
     headers.forEach((header, index) => {
       const cell = headerRow.getCell(index + 1);
       cell.value = header;
-      cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
+      cell.font = { bold: true, size: 11, color: { argb: "FF000000" } };
       cell.fill = {
         type: "pattern",
         pattern: "solid",
@@ -517,49 +796,72 @@ export class ExcelProcessor {
       };
     });
 
-    let rowIndex = 4; // Start from row 4
+    calculations.sort((a, b) => {
+      const na = Number(a.empId),
+        nb = Number(b.empId);
+      if (isFinite(na) && isFinite(nb) && na !== nb) return na - nb;
+      return (
+        String(a.empId).localeCompare(String(b.empId)) ||
+        a.name.localeCompare(b.name)
+      );
+    });
+
+    const dataStartRow = 4;
+    let rowIndex = dataStartRow;
+    const monthOrder = [
+      "NOV-24",
+      "DEC-24",
+      "JAN-25",
+      "FEB-25",
+      "MAR-25",
+      "APR-25",
+      "MAY-25",
+      "JUN-25",
+      "JUL-25",
+      "AUG-25",
+      "SEP-25",
+    ];
 
     calculations.forEach((calc, index) => {
-      const currentRow = worksheet.getRow(rowIndex + index);
+      const rowNum = rowIndex + index;
+      const currentRow = worksheet.getRow(rowNum);
       currentRow.height = 25;
 
-      // Get 12 months of data
-      const monthlyValues: (number | null)[] = new Array(12).fill(null);
-      calc.monthlyData.forEach((month, idx) => {
-        if (idx < 12 && month.salary > 0) {
-          monthlyValues[idx] = Math.round(month.salary);
-        }
+      const monthToSalary = new Map<string, number>();
+      for (const md of calc.monthlyData || []) {
+        const key = (md.month || "").slice(0, 6).toUpperCase();
+        if (!monthToSalary.has(key) && md.salary > 0)
+          monthToSalary.set(key, Math.round(md.salary));
+      }
+
+      // Check if October should be included
+      const includeOctober = this.shouldIncludeOctober(calc.monthlyData || []);
+
+      const monthlyValues: (number | null)[] = monthOrder.map((m) => {
+        const v = monthToSalary.get(m);
+        return typeof v === "number" ? Math.round(v) : null;
       });
 
-      // Basic data (columns A-Q)
-      const dataValues = [
-        index + 1, // A: Sr.No.
-        calc.empId, // B: EMP Code
-        calc.department || dept, // C: Deptt.
-        calc.name, // D: EMP. NAME
-        calc.bonusPercent, // E: %
-        ...monthlyValues, // F-Q: Monthly salaries
-      ];
+      // Add October only if AUG-25 salary > 0
+      if (includeOctober) {
+        const octValue = monthToSalary.get("OCT-25");
+        monthlyValues.push(
+          octValue !== undefined ? Math.round(octValue) : null
+        );
+      } else {
+        monthlyValues.push(null); // Keep null for October
+      }
 
-      dataValues.forEach((value, colIndex) => {
+      const basicData = [index + 1, calc.empId, calc.name, calc.doj];
+      basicData.forEach((value, colIndex) => {
         const cell = currentRow.getCell(colIndex + 1);
         cell.value = value;
-
-        // Apply styling based on column
-        if (colIndex === 3) {
-          // Name column - left aligned
+        if (colIndex === 2)
           cell.alignment = { horizontal: "left", vertical: "middle" };
-        } else if (colIndex >= 4) {
-          // Numeric columns - right aligned
-          cell.alignment = { horizontal: "right", vertical: "middle" };
-          if (colIndex >= 5 && value !== null) {
-            // Monthly salary columns
-            cell.numFmt = "#,##0";
-          }
-        } else {
+        else if (colIndex === 3 && value instanceof Date) {
+          cell.numFmt = "dd-mm-yyyy";
           cell.alignment = { horizontal: "center", vertical: "middle" };
-        }
-
+        } else cell.alignment = { horizontal: "center", vertical: "middle" };
         cell.border = {
           top: { style: "thin", color: { argb: "FFCCCCCC" } },
           bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
@@ -568,38 +870,64 @@ export class ExcelProcessor {
         };
       });
 
-      // Add formulas for calculated columns
-      const rowNum = rowIndex + index;
+      monthlyValues.forEach((value, idx) => {
+        const cell = currentRow.getCell(5 + idx);
+        cell.value = value; // Will be null for missing months, which Excel displays as blank
+        if (value !== null) {
+          cell.numFmt = "#,##0";
+        }
+        cell.alignment = { horizontal: "right", vertical: "middle" };
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFCCCCCC" } },
+          bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+          left: { style: "thin", color: { argb: "FFCCCCCC" } },
+          right: { style: "thin", color: { argb: "FFCCCCCC" } },
+        };
+      });
 
-      // R: GROSS SAL. = ROUND(SUM(F:Q), 0)
-      const grossSalCell = currentRow.getCell(18); // Column R
-      grossSalCell.value = { formula: `ROUND(SUM(F${rowNum}:Q${rowNum}),0)` };
-      grossSalCell.numFmt = "#,##0";
-      grossSalCell.alignment = { horizontal: "right", vertical: "middle" };
-      grossSalCell.border = {
+      const octCell = currentRow.getCell(16);
+      octCell.value = {
+        formula: `IF(N${rowNum}=0, "", IF(COUNTBLANK(E${rowNum}:O${rowNum})=11, "", ROUND(AVERAGEIF(E${rowNum}:O${rowNum},">0"),0)))`,
+      };
+
+      octCell.numFmt = "#,##0";
+      octCell.alignment = { horizontal: "right", vertical: "middle" };
+      octCell.border = {
         top: { style: "thin", color: { argb: "FFCCCCCC" } },
         bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
         left: { style: "thin", color: { argb: "FFCCCCCC" } },
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // S: GROSS 02 = ROUND(IF(E=8.33, R, IF(E>8.33, R*0.6, "")), 0)
-      const gross02Cell = currentRow.getCell(19); // Column S
-      gross02Cell.value = {
-        formula: `ROUND(IF(E${rowNum}=8.33,R${rowNum},IF(E${rowNum}>8.33,R${rowNum}*0.6,"")),0)`,
+      const grossSalaryCell = currentRow.getCell(17);
+      grossSalaryCell.value = {
+        formula: `ROUND(SUM(E${rowNum}:P${rowNum}),0)`,
       };
-      gross02Cell.numFmt = "#,##0";
-      gross02Cell.alignment = { horizontal: "right", vertical: "middle" };
-      gross02Cell.border = {
+      grossSalaryCell.numFmt = "#,##0";
+      grossSalaryCell.alignment = { horizontal: "right", vertical: "middle" };
+      grossSalaryCell.border = {
         top: { style: "thin", color: { argb: "FFCCCCCC" } },
         bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
         left: { style: "thin", color: { argb: "FFCCCCCC" } },
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // T: Register = ROUND(R*E/100, 0)
-      const registerCell = currentRow.getCell(20); // Column T
-      registerCell.value = { formula: `ROUND(R${rowNum}*E${rowNum}/100,0)` };
+      const gross2Cell = currentRow.getCell(18);
+      gross2Cell.value = {
+        formula: `IF(X${rowNum}=8.33,Q${rowNum},IF(X${rowNum}>8.33,Q${rowNum}*0.6,""))`,
+      };
+      gross2Cell.numFmt = "#,##0";
+      gross2Cell.alignment = { horizontal: "right", vertical: "middle" };
+      gross2Cell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      const registerCell = currentRow.getCell(19);
+      const percentValue = calc.bonusPercent || 8.33;
+      registerCell.value = { formula: `ROUND(R${rowNum}*${percentValue}%,0)` };
       registerCell.numFmt = "#,##0";
       registerCell.alignment = { horizontal: "right", vertical: "middle" };
       registerCell.border = {
@@ -609,11 +937,62 @@ export class ExcelProcessor {
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // U: Actual = ROUND(IF(E=8.33, R*E/100, IF(E>8.33, S*E/100, "")), 0)
-      const actualCell = currentRow.getCell(21); // Column U
-      actualCell.value = {
-        formula: `ROUND(IF(E${rowNum}=8.33,R${rowNum}*E${rowNum}/100,IF(E${rowNum}>8.33,S${rowNum}*E${rowNum}/100,"")),0)`,
+      const alreadyPaidCell = currentRow.getCell(20);
+      alreadyPaidCell.value = calc.alreadyPaid || 0;
+      alreadyPaidCell.numFmt = "#,##0";
+      alreadyPaidCell.alignment = { horizontal: "right", vertical: "middle" };
+      alreadyPaidCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
+
+      const unpaidCell = currentRow.getCell(21);
+      unpaidCell.value = calc.unpaid || 0;
+      unpaidCell.numFmt = "#,##0";
+      unpaidCell.alignment = { horizontal: "right", vertical: "middle" };
+      unpaidCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      const eligibleCell = currentRow.getCell(22);
+      eligibleCell.value = "Yes";
+      eligibleCell.alignment = { horizontal: "center", vertical: "middle" };
+      eligibleCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      const afterVCell = currentRow.getCell(23);
+      afterVCell.value = { formula: `S${rowNum}-(T${rowNum}+U${rowNum})` };
+      afterVCell.numFmt = "#,##0";
+      afterVCell.alignment = { horizontal: "right", vertical: "middle" };
+      afterVCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      const percentageCell = currentRow.getCell(24);
+      percentageCell.value = calc.bonusPercent || 0;
+      percentageCell.numFmt = "0.00";
+      percentageCell.alignment = { horizontal: "right", vertical: "middle" };
+      percentageCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      const actualCell = currentRow.getCell(25);
+      actualCell.value = { formula: `S${rowNum}-(T${rowNum}+U${rowNum})` };
       actualCell.numFmt = "#,##0";
       actualCell.alignment = { horizontal: "right", vertical: "middle" };
       actualCell.border = {
@@ -623,35 +1002,8 @@ export class ExcelProcessor {
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // V: Un Paid = 0
-      const unPaidCell = currentRow.getCell(22); // Column V
-      unPaidCell.value = 0;
-      unPaidCell.numFmt = "#,##0";
-      unPaidCell.alignment = { horizontal: "right", vertical: "middle" };
-      unPaidCell.border = {
-        top: { style: "thin", color: { argb: "FFCCCCCC" } },
-        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
-        left: { style: "thin", color: { argb: "FFCCCCCC" } },
-        right: { style: "thin", color: { argb: "FFCCCCCC" } },
-      };
-
-      // W: Final RTGS = ROUND(IF(E=8.33, T, IF(E>8.33, T*0.6, "")), 0)
-      const finalRTGSCell = currentRow.getCell(23); // Column W
-      finalRTGSCell.value = {
-        formula: `ROUND(IF(E${rowNum}=8.33,T${rowNum},IF(E${rowNum}>8.33,T${rowNum}*0.6,"")),0)`,
-      };
-      finalRTGSCell.numFmt = "#,##0";
-      finalRTGSCell.alignment = { horizontal: "right", vertical: "middle" };
-      finalRTGSCell.border = {
-        top: { style: "thin", color: { argb: "FFCCCCCC" } },
-        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
-        left: { style: "thin", color: { argb: "FFCCCCCC" } },
-        right: { style: "thin", color: { argb: "FFCCCCCC" } },
-      };
-
-      // X: Reim. = 0
-      const reimCell = currentRow.getCell(24); // Column X
-      reimCell.value = 0;
+      const reimCell = currentRow.getCell(26);
+      reimCell.value = { formula: `W${rowNum}-Y${rowNum}` };
       reimCell.numFmt = "#,##0";
       reimCell.alignment = { horizontal: "right", vertical: "middle" };
       reimCell.border = {
@@ -660,16 +1012,178 @@ export class ExcelProcessor {
         left: { style: "thin", color: { argb: "FFCCCCCC" } },
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
+
+      // NEW: Loan column (column 27)
+      const loanCell = currentRow.getCell(27);
+      loanCell.value = calc.loan || 0;
+      loanCell.numFmt = "#,##0";
+      loanCell.alignment = { horizontal: "right", vertical: "middle" };
+      loanCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // UPDATE: Final RTGS (now column 28, was 27)
+      const finalRTGSCell = currentRow.getCell(28);
+      finalRTGSCell.value = { formula: `Y${rowNum}-AA${rowNum}` }; // Actual - Loan
+      finalRTGSCell.numFmt = "#,##0";
+      finalRTGSCell.alignment = { horizontal: "right", vertical: "middle" };
+      finalRTGSCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
     });
 
-    // Add totals row
-    const totalsRowIndex = rowIndex + calculations.length;
+    const dataEndRow = dataStartRow + calculations.length - 1;
+    const monthTotalsRowIndex = dataEndRow + 1;
+    const monthTotalsRow = worksheet.getRow(monthTotalsRowIndex);
+    monthTotalsRow.height = 28;
+
+    const monthTotalsLabel = worksheet.getCell(`A${monthTotalsRowIndex}`);
+    monthTotalsLabel.value = "MONTH TOTALS";
+    monthTotalsLabel.font = { bold: true };
+    monthTotalsLabel.alignment = { horizontal: "center", vertical: "middle" };
+    monthTotalsLabel.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFF59D" },
+    };
+    monthTotalsLabel.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const monthCols = [
+      { title: "NOV-24", col: "E" },
+      { title: "DEC-24", col: "F" },
+      { title: "JAN-25", col: "G" },
+      { title: "FEB-25", col: "H" },
+      { title: "MAR-25", col: "I" },
+      { title: "APR-25", col: "J" },
+      { title: "MAY-25", col: "K" },
+      { title: "JUN-25", col: "L" },
+      { title: "JUL-25", col: "M" },
+      { title: "AUG-25", col: "N" },
+      { title: "SEP-25", col: "O" },
+      { title: "OCT-25", col: "P" },
+    ];
+    for (const col of monthCols) {
+      const cell = worksheet.getCell(`${col.col}${monthTotalsRowIndex}`);
+      cell.value = {
+        formula: `SUM(${col.col}${dataStartRow}:${col.col}${dataEndRow})`,
+      };
+      cell.numFmt = "₹#,##0";
+      cell.font = { bold: true };
+      cell.alignment = { horizontal: "right", vertical: "middle" };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFF59D" },
+      };
+      cell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+    }
+
+    // Add Year Total (NOV-SEP) one row below month totals
+    const yearNovSepRowIndex = monthTotalsRowIndex + 1;
+    const yearNovSepRow = worksheet.getRow(yearNovSepRowIndex);
+    yearNovSepRow.height = 28;
+
+    const yearNovSepLabelCell = worksheet.getCell(`A${yearNovSepRowIndex}`);
+    yearNovSepLabelCell.value = "YEAR TOTAL (NOV–SEP)";
+    yearNovSepLabelCell.font = { bold: true };
+    yearNovSepLabelCell.alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    yearNovSepLabelCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    yearNovSepLabelCell.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const yearNovSepTotalCell = worksheet.getCell(`Q${yearNovSepRowIndex}`);
+    yearNovSepTotalCell.value = {
+      formula: `SUM(E${monthTotalsRowIndex}:O${monthTotalsRowIndex})`,
+    };
+    yearNovSepTotalCell.numFmt = "₹#,##0";
+    yearNovSepTotalCell.font = { bold: true };
+    yearNovSepTotalCell.alignment = { horizontal: "right", vertical: "middle" };
+    yearNovSepTotalCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    yearNovSepTotalCell.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    // Add Full Year Total (NOV–OCT) below NOV-SEP total
+    const fullYearRowIndex = yearNovSepRowIndex + 1;
+    const fullYearRow = worksheet.getRow(fullYearRowIndex);
+    fullYearRow.height = 28;
+
+    const fullYearLabelCell = worksheet.getCell(`A${fullYearRowIndex}`);
+    fullYearLabelCell.value = "YEAR TOTAL (NOV–OCT)";
+    fullYearLabelCell.font = { bold: true };
+    fullYearLabelCell.alignment = { horizontal: "center", vertical: "middle" };
+    fullYearLabelCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    fullYearLabelCell.border = {
+      top: { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const fullYearTotalCell = worksheet.getCell(`Q${fullYearRowIndex}`);
+    fullYearTotalCell.value = {
+      formula: `SUM(E${monthTotalsRowIndex}:P${monthTotalsRowIndex})`,
+    };
+    fullYearTotalCell.numFmt = "₹#,##0";
+    fullYearTotalCell.font = { bold: true };
+    fullYearTotalCell.alignment = { horizontal: "right", vertical: "middle" };
+    fullYearTotalCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    fullYearTotalCell.border = {
+      top: { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    // Grand totals row comes after the year totals
+    const totalsRowIndex = fullYearRowIndex + 1;
     const totalsRow = worksheet.getRow(totalsRowIndex);
     totalsRow.height = 35;
 
-    // Add "GRAND TOTAL" label
     const grandTotalCell = totalsRow.getCell(1);
-    grandTotalCell.value = "GRAND TOTAL";
+    grandTotalCell.value = "GRAND TOTAL :- ";
     grandTotalCell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
     grandTotalCell.fill = {
       type: "pattern",
@@ -684,17 +1198,21 @@ export class ExcelProcessor {
       right: { style: "thin", color: { argb: "FF000000" } },
     };
 
-    // Add total formulas
-    const dataStartRow = 4;
-    const dataEndRow = rowIndex + calculations.length - 1;
+    const totalColumns = [17, 18, 19, 20, 21, 23, 25, 26, 27, 28]; // Added 27, changed last to 28
 
-    // Columns with totals: R, S, T, U, V, W, X
-    const totalColumns = [18, 19, 20, 21, 22, 23, 24]; // R through X
-    totalColumns.forEach((colIndex) => {
-      const cell = totalsRow.getCell(colIndex);
-      const colLetter = String.fromCharCode(64 + colIndex); // Convert to column letter
+    const colLetter = (n: number) => {
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      if (n <= 26) return letters[n - 1];
+      const first = letters[Math.floor((n - 1) / 26) - 1];
+      const second = letters[(n - 1) % 26];
+      return `${first}${second}`;
+    };
+
+    totalColumns.forEach((ci) => {
+      const cell = totalsRow.getCell(ci);
+      const letter = colLetter(ci);
       cell.value = {
-        formula: `SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`,
+        formula: `SUM(${letter}${dataStartRow}:${letter}${dataEndRow})`,
       };
       cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
       cell.fill = {
@@ -712,19 +1230,43 @@ export class ExcelProcessor {
       };
     });
 
-    // Set column widths
     const colWidths = [
-      60, 80, 80, 200, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 110,
-      100, 100, 100, 90, 110, 80,
+      50,
+      80,
+      180,
+      90, // SR.No, EMP Code, Name, DOJ
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80, // 12 months
+      100,
+      100,
+      100,
+      100,
+      100,
+      80,
+      100,
+      80,
+      100,
+      100, // Gross to Reim
+      100, // Loan - ADD THIS
+      110, // Final RTGS
     ];
     colWidths.forEach((width, index) => {
-      worksheet.getColumn(index + 1).width = width / 7; // ExcelJS uses character units
+      worksheet.getColumn(index + 1).width = width / 7;
     });
 
-    // Set row heights
-    worksheet.getRow(1).height = 35; // Title row
-    worksheet.getRow(2).height = 15; // Empty row
-    worksheet.getRow(3).height = 30; // Header row
+    worksheet.getRow(1).height = 35;
+    worksheet.getRow(2).height = 15;
+    worksheet.getRow(3).height = 30;
   }
 
   private static async generateWorkerSheet(
@@ -734,15 +1276,12 @@ export class ExcelProcessor {
     dept: string
   ): Promise<void> {
     const worksheet = workbook.addWorksheet(sheetName);
-
     const title = `DIWALI BONUS LIST FROM NOVEMBER-2024 TO OCTOBER-2025 (2024-2025) INDIANA BOYS ${sheetName.toUpperCase()}`;
-
     const headers = [
-      "Sr.No.",
+      "SR. No.",
       "EMP Code",
-      "Deptt.",
-      "EMP. NAME",
-      "%",
+      "Emp Name",
+      "DOJ",
       "NOV-24",
       "DEC-24",
       "JAN-25",
@@ -755,14 +1294,21 @@ export class ExcelProcessor {
       "AUG-25",
       "SEP-25",
       "Salary12",
-      "Gross",
+      "Gross Salary",
       "Register",
-      "Due VC",
+      "Already Paid",
+      "Unpaid",
+      "Eligible",
+      "After V",
+      "Percentage",
+      "Actual",
+      "Reim",
+      "Loan",
       "Final RTGS",
     ];
 
-    // Add title
-    worksheet.mergeCells("A1:U1");
+    // Title row
+    worksheet.mergeCells("A1:AB1");
     const titleCell = worksheet.getCell("A1");
     titleCell.value = title;
     titleCell.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
@@ -773,15 +1319,14 @@ export class ExcelProcessor {
     };
     titleCell.alignment = { horizontal: "center", vertical: "middle" };
 
-    // Add empty row
     worksheet.getRow(2).height = 15;
 
-    // Add headers
+    // Header row
     const headerRow = worksheet.getRow(3);
     headers.forEach((header, index) => {
       const cell = headerRow.getCell(index + 1);
       cell.value = header;
-      cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
+      cell.font = { bold: true, size: 11, color: { argb: "FF000000" } };
       cell.fill = {
         type: "pattern",
         pattern: "solid",
@@ -796,48 +1341,77 @@ export class ExcelProcessor {
       };
     });
 
-    let rowIndex = 4; // Start from row 4
+    // Sort calculations
+    calculations.sort((a, b) => {
+      const na = Number(a.empId),
+        nb = Number(b.empId);
+      if (isFinite(na) && isFinite(nb) && na !== nb) return na - nb;
+      return (
+        String(a.empId).localeCompare(String(b.empId)) ||
+        a.name.localeCompare(b.name)
+      );
+    });
+
+    const dataStartRow = 4;
+    let rowIndex = dataStartRow;
+    const monthOrder = [
+      "NOV-24",
+      "DEC-24",
+      "JAN-25",
+      "FEB-25",
+      "MAR-25",
+      "APR-25",
+      "MAY-25",
+      "JUN-25",
+      "JUL-25",
+      "AUG-25",
+      "SEP-25",
+    ];
 
     calculations.forEach((calc, index) => {
-      const currentRow = worksheet.getRow(rowIndex + index);
+      const rowNum = rowIndex + index;
+      const currentRow = worksheet.getRow(rowNum);
       currentRow.height = 25;
 
-      // Get 11 months of data for workers
-      const monthlyValues: (number | null)[] = new Array(11).fill(null);
-      calc.monthlyData.forEach((month, idx) => {
-        if (idx < 11 && month.salary > 0) {
-          monthlyValues[idx] = Math.round(month.salary);
-        }
+      const monthToSalary = new Map<string, number>();
+      for (const md of calc.monthlyData || []) {
+        const key = (md.month || "").slice(0, 6).toUpperCase();
+        if (!monthToSalary.has(key) && md.salary > 0)
+          monthToSalary.set(key, Math.round(md.salary));
+      }
+
+      const monthlyValues: (number | null)[] = monthOrder.map((m) => {
+        const v = monthToSalary.get(m);
+        return typeof v === "number" ? Math.round(v) : null;
       });
 
-      // Basic data (columns A-P)
-      const dataValues = [
-        index + 1, // A: Sr.No.
-        calc.empId, // B: EMP Code
-        calc.department || dept, // C: Deptt.
-        calc.name, // D: EMP. NAME
-        calc.bonusPercent, // E: %
-        ...monthlyValues, // F-P: Monthly salaries (11 months)
-      ];
-
-      dataValues.forEach((value, colIndex) => {
+      // Basic data (SR. No., EMP Code, Name, DOJ)
+      const basicData = [index + 1, calc.empId, calc.name, calc.doj];
+      basicData.forEach((value, colIndex) => {
         const cell = currentRow.getCell(colIndex + 1);
         cell.value = value;
-
-        // Apply styling based on column
-        if (colIndex === 3) {
-          // Name column - left aligned
+        if (colIndex === 2)
           cell.alignment = { horizontal: "left", vertical: "middle" };
-        } else if (colIndex >= 4) {
-          // Numeric columns - right aligned
-          cell.alignment = { horizontal: "right", vertical: "middle" };
-          if (colIndex >= 5 && value !== null) {
-            // Monthly salary columns
-            cell.numFmt = "#,##0";
-          }
-        } else {
+        else if (colIndex === 3 && value instanceof Date) {
+          cell.numFmt = "dd-mm-yyyy";
           cell.alignment = { horizontal: "center", vertical: "middle" };
+        } else cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFCCCCCC" } },
+          bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+          left: { style: "thin", color: { argb: "FFCCCCCC" } },
+          right: { style: "thin", color: { argb: "FFCCCCCC" } },
+        };
+      });
+
+      // Monthly values (NOV-24 to SEP-25)
+      monthlyValues.forEach((value, idx) => {
+        const cell = currentRow.getCell(5 + idx);
+        cell.value = value;
+        if (value !== null) {
+          cell.numFmt = "#,##0";
         }
+        cell.alignment = { horizontal: "right", vertical: "middle" };
 
         cell.border = {
           top: { style: "thin", color: { argb: "FFCCCCCC" } },
@@ -847,13 +1421,10 @@ export class ExcelProcessor {
         };
       });
 
-      // Add formulas for calculated columns
-      const rowNum = rowIndex + index;
-
-      // Q: Salary12 = ROUND(AVERAGE(F:P), 0)
-      const salary12Cell = currentRow.getCell(17); // Column Q
+      // Salary12 (Column P, index 16) = AVERAGE(E to O)
+      const salary12Cell = currentRow.getCell(16);
       salary12Cell.value = {
-        formula: `ROUND(AVERAGE(F${rowNum}:P${rowNum}),0)`,
+        formula: `IF(N${rowNum}=0, "", IF(COUNTBLANK(E${rowNum}:O${rowNum})=11, "", ROUND(AVERAGEIF(E${rowNum}:O${rowNum},">0"),0)))`,
       };
       salary12Cell.numFmt = "#,##0";
       salary12Cell.alignment = { horizontal: "right", vertical: "middle" };
@@ -864,21 +1435,30 @@ export class ExcelProcessor {
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // R: Gross = ROUND(SUM(F:Q), 0)
-      const grossCell = currentRow.getCell(18); // Column R
-      grossCell.value = { formula: `ROUND(SUM(F${rowNum}:Q${rowNum}),0)` };
-      grossCell.numFmt = "#,##0";
-      grossCell.alignment = { horizontal: "right", vertical: "middle" };
-      grossCell.border = {
+      // Gross Salary (Column Q, index 17) = SUM(E to P)
+      const grossSalaryCell = currentRow.getCell(17);
+      grossSalaryCell.value = {
+        formula: `ROUND(SUM(E${rowNum}:P${rowNum}),0)`,
+      };
+      grossSalaryCell.numFmt = "#,##0";
+      grossSalaryCell.alignment = { horizontal: "right", vertical: "middle" };
+      grossSalaryCell.border = {
         top: { style: "thin", color: { argb: "FFCCCCCC" } },
         bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
         left: { style: "thin", color: { argb: "FFCCCCCC" } },
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // S: Register = ROUND(R*8.33%, 0)
-      const registerCell = currentRow.getCell(19); // Column S
-      registerCell.value = { formula: `ROUND(R${rowNum}*8.33%,0)` };
+      // Register (Column R, index 18) = Gross Salary * 8.33%
+      // Register (Column R, index 18) = Gross Salary * 8.33% OR 0 if cash salary
+      const registerCell = currentRow.getCell(18);
+      if (calc.isCashSalary) {
+        // For cash salary employees, register is 0
+        registerCell.value = 0;
+      } else {
+        // For regular employees, calculate register
+        registerCell.value = { formula: `ROUND(Q${rowNum}*8.33%,0)` };
+      }
       registerCell.numFmt = "#,##0";
       registerCell.alignment = { horizontal: "right", vertical: "middle" };
       registerCell.border = {
@@ -888,21 +1468,104 @@ export class ExcelProcessor {
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // T: Due VC = 0
-      const dueVCCell = currentRow.getCell(20); // Column T
-      dueVCCell.value = 0;
-      dueVCCell.numFmt = "#,##0";
-      dueVCCell.alignment = { horizontal: "right", vertical: "middle" };
-      dueVCCell.border = {
+      // Already Paid (Column S, index 19)
+      const alreadyPaidCell = currentRow.getCell(19);
+      alreadyPaidCell.value = calc.alreadyPaid || 0;
+      alreadyPaidCell.numFmt = "#,##0";
+      alreadyPaidCell.alignment = { horizontal: "right", vertical: "middle" };
+      alreadyPaidCell.border = {
         top: { style: "thin", color: { argb: "FFCCCCCC" } },
         bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
         left: { style: "thin", color: { argb: "FFCCCCCC" } },
         right: { style: "thin", color: { argb: "FFCCCCCC" } },
       };
 
-      // U: Final RTGS = ROUND(S-T, 0)
-      const finalRTGSCell = currentRow.getCell(21); // Column U
-      finalRTGSCell.value = { formula: `ROUND(S${rowNum}-T${rowNum},0)` };
+      // Unpaid (Column T, index 20)
+      const unpaidCell = currentRow.getCell(20);
+      unpaidCell.value = calc.unpaid || 0;
+      unpaidCell.numFmt = "#,##0";
+      unpaidCell.alignment = { horizontal: "right", vertical: "middle" };
+      unpaidCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Eligible (Column U, index 21)
+      const eligibleCell = currentRow.getCell(21);
+      eligibleCell.value = calc.isEligible ? "Yes" : "No";
+      eligibleCell.alignment = { horizontal: "center", vertical: "middle" };
+      eligibleCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // After V (Column V, index 22) = Register - (Already Paid + Unpaid)
+      const afterVCell = currentRow.getCell(22);
+      afterVCell.value = { formula: `R${rowNum}-(S${rowNum}+T${rowNum})` };
+      afterVCell.numFmt = "#,##0";
+      afterVCell.alignment = { horizontal: "right", vertical: "middle" };
+      afterVCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Percentage (Column W, index 23)
+      const percentageCell = currentRow.getCell(23);
+      percentageCell.value = calc.bonusPercent || 0;
+      percentageCell.numFmt = "0.00";
+      percentageCell.alignment = { horizontal: "right", vertical: "middle" };
+      percentageCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Actual (Column X, index 24)
+      const actualCell = currentRow.getCell(24);
+      actualCell.value = { formula: `IF(U${rowNum}="Yes",V${rowNum},0)` };
+      actualCell.numFmt = "#,##0";
+      actualCell.alignment = { horizontal: "right", vertical: "middle" };
+      actualCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Reim (Column Y, index 25) = After V - Actual
+      const reimCell = currentRow.getCell(25);
+      reimCell.value = { formula: `V${rowNum}-X${rowNum}` };
+      reimCell.numFmt = "#,##0";
+      reimCell.alignment = { horizontal: "right", vertical: "middle" };
+      reimCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Loan (Column Z, index 26)
+      const loanCell = currentRow.getCell(26);
+      loanCell.value = calc.loan || 0;
+      loanCell.numFmt = "#,##0";
+      loanCell.alignment = { horizontal: "right", vertical: "middle" };
+      loanCell.border = {
+        top: { style: "thin", color: { argb: "FFCCCCCC" } },
+        bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+        left: { style: "thin", color: { argb: "FFCCCCCC" } },
+        right: { style: "thin", color: { argb: "FFCCCCCC" } },
+      };
+
+      // Final RTGS (Column AA, index 27) = Actual - Loan
+      const finalRTGSCell = currentRow.getCell(27);
+      finalRTGSCell.value = { formula: `X${rowNum}-Z${rowNum}` };
       finalRTGSCell.numFmt = "#,##0";
       finalRTGSCell.alignment = { horizontal: "right", vertical: "middle" };
       finalRTGSCell.border = {
@@ -913,12 +1576,12 @@ export class ExcelProcessor {
       };
     });
 
-    // Add totals row
-    const totalsRowIndex = rowIndex + calculations.length;
+    // Grand totals row
+    const dataEndRow = dataStartRow + calculations.length - 1;
+    const totalsRowIndex = dataEndRow + 1;
     const totalsRow = worksheet.getRow(totalsRowIndex);
     totalsRow.height = 35;
 
-    // Add "GRAND TOTAL" label
     const grandTotalCell = totalsRow.getCell(1);
     grandTotalCell.value = "GRAND TOTAL";
     grandTotalCell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
@@ -935,17 +1598,163 @@ export class ExcelProcessor {
       right: { style: "thin", color: { argb: "FF000000" } },
     };
 
-    // Add total formulas for workers
-    const dataStartRow = 4;
-    const dataEndRow = rowIndex + calculations.length - 1;
+    // After the grand totals row code, add month totals and year totals
 
-    // Columns with totals: R, S, U (18, 19, 21)
-    const totalColumns = [18, 19, 21]; // R, S, U
-    totalColumns.forEach((colIndex) => {
-      const cell = totalsRow.getCell(colIndex);
-      const colLetter = String.fromCharCode(64 + colIndex); // Convert to column letter
+    // Month Totals Row
+    const monthTotalsRowIndex = totalsRowIndex + 1;
+    const monthTotalsRow = worksheet.getRow(monthTotalsRowIndex);
+    monthTotalsRow.height = 28;
+
+    const monthTotalsLabel = worksheet.getCell(`A${monthTotalsRowIndex}`);
+    monthTotalsLabel.value = "MONTH TOTALS";
+    monthTotalsLabel.font = { bold: true };
+    monthTotalsLabel.alignment = { horizontal: "center", vertical: "middle" };
+    monthTotalsLabel.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFF59D" },
+    };
+    monthTotalsLabel.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    // Month columns (E to O = NOV-24 to SEP-25)
+    const monthCols = [
+      { title: "NOV-24", col: "E" },
+      { title: "DEC-24", col: "F" },
+      { title: "JAN-25", col: "G" },
+      { title: "FEB-25", col: "H" },
+      { title: "MAR-25", col: "I" },
+      { title: "APR-25", col: "J" },
+      { title: "MAY-25", col: "K" },
+      { title: "JUN-25", col: "L" },
+      { title: "JUL-25", col: "M" },
+      { title: "AUG-25", col: "N" },
+      { title: "SEP-25", col: "O" },
+    ];
+
+    for (const col of monthCols) {
+      const cell = worksheet.getCell(`${col.col}${monthTotalsRowIndex}`);
       cell.value = {
-        formula: `SUM(${colLetter}${dataStartRow}:${colLetter}${dataEndRow})`,
+        formula: `SUM(${col.col}${dataStartRow}:${col.col}${dataEndRow})`,
+      };
+      cell.numFmt = "₹#,##0";
+      cell.font = { bold: true };
+      cell.alignment = { horizontal: "right", vertical: "middle" };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFF59D" },
+      };
+      cell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+    }
+
+    // Year Total (NOV-SEP) - one row below month totals
+    const yearNovSepRowIndex = monthTotalsRowIndex + 1;
+    const yearNovSepRow = worksheet.getRow(yearNovSepRowIndex);
+    yearNovSepRow.height = 28;
+
+    const yearNovSepLabelCell = worksheet.getCell(`A${yearNovSepRowIndex}`);
+    yearNovSepLabelCell.value = "YEAR TOTAL (NOV–SEP)";
+    yearNovSepLabelCell.font = { bold: true };
+    yearNovSepLabelCell.alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    yearNovSepLabelCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    yearNovSepLabelCell.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const yearNovSepTotalCell = worksheet.getCell(`Q${yearNovSepRowIndex}`);
+    yearNovSepTotalCell.value = {
+      formula: `SUM(E${monthTotalsRowIndex}:O${monthTotalsRowIndex})`,
+    };
+    yearNovSepTotalCell.numFmt = "₹#,##0";
+    yearNovSepTotalCell.font = { bold: true };
+    yearNovSepTotalCell.alignment = { horizontal: "right", vertical: "middle" };
+    yearNovSepTotalCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    yearNovSepTotalCell.border = {
+      top: { style: "medium", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    // Full Year Total (NOV–SEP + Salary12) - below NOV-SEP total
+    const fullYearRowIndex = yearNovSepRowIndex + 1;
+    const fullYearRow = worksheet.getRow(fullYearRowIndex);
+    fullYearRow.height = 28;
+
+    const fullYearLabelCell = worksheet.getCell(`A${fullYearRowIndex}`);
+    fullYearLabelCell.value = "YEAR TOTAL (NOV–SEP + Salary12)";
+    fullYearLabelCell.font = { bold: true };
+    fullYearLabelCell.alignment = { horizontal: "center", vertical: "middle" };
+    fullYearLabelCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    fullYearLabelCell.border = {
+      top: { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const fullYearTotalCell = worksheet.getCell(`Q${fullYearRowIndex}`);
+    fullYearTotalCell.value = {
+      formula: `SUM(E${monthTotalsRowIndex}:P${monthTotalsRowIndex})`,
+    };
+    fullYearTotalCell.numFmt = "₹#,##0";
+    fullYearTotalCell.font = { bold: true };
+    fullYearTotalCell.alignment = { horizontal: "right", vertical: "middle" };
+    fullYearTotalCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFD54F" },
+    };
+    fullYearTotalCell.border = {
+      top: { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "medium", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+
+    const totalColumns = [17, 18, 19, 20, 22, 24, 25, 26, 27]; // Q, R, S, T, V, X, Y, Z, AA
+
+    const colLetter = (n: number) => {
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      if (n <= 26) return letters[n - 1];
+      const first = letters[Math.floor((n - 1) / 26) - 1];
+      const second = letters[(n - 1) % 26];
+      return `${first}${second}`;
+    };
+
+    totalColumns.forEach((ci) => {
+      const cell = totalsRow.getCell(ci);
+      const letter = colLetter(ci);
+      cell.value = {
+        formula: `SUM(${letter}${dataStartRow}:${letter}${dataEndRow})`,
       };
       cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
       cell.fill = {
@@ -963,29 +1772,489 @@ export class ExcelProcessor {
       };
     });
 
-    // Set column widths for workers
+    // Column widths
     const colWidths = [
-      60, 80, 80, 200, 60, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 100, 110,
-      100, 90, 110,
+      50,
+      80,
+      180,
+      90, // SR.No, EMP Code, Name, DOJ
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80, // 11 months
+      100,
+      100,
+      100,
+      100,
+      100,
+      80,
+      100,
+      80,
+      100,
+      100,
+      100,
+      110, // Salary12 to Final RTGS
     ];
     colWidths.forEach((width, index) => {
-      worksheet.getColumn(index + 1).width = width / 7; // ExcelJS uses character units
+      worksheet.getColumn(index + 1).width = width / 7;
     });
 
-    // Set row heights
-    worksheet.getRow(1).height = 35; // Title row
-    worksheet.getRow(2).height = 15; // Empty row
-    worksheet.getRow(3).height = 30; // Header row
+    worksheet.getRow(1).height = 35;
+    worksheet.getRow(2).height = 15;
+    worksheet.getRow(3).height = 30;
+  }
+
+  static async computeHRMonthlyTotals(
+    hrBuffer: ArrayBuffer
+  ): Promise<Map<string, number>> {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(hrBuffer);
+
+    const names = [
+      "JAN",
+      "FEB",
+      "MAR",
+      "APR",
+      "MAY",
+      "JUN",
+      "JUL",
+      "AUG",
+      "SEP",
+      "OCT",
+      "NOV",
+      "DEC",
+    ];
+    const toMonthKey = (val: any): string | null => {
+      if (!val) return null;
+      if (val instanceof Date) {
+        const m = val.getMonth();
+        const y = (val.getFullYear() % 100).toString().padStart(2, "0");
+        return `${names[m]}-${y}`;
+      }
+      const s = String(val).trim();
+
+      // Match patterns like "2024-11-01" or "Nov-24" or "NOV-24"
+      const m1 = s.match(/\b(20\d{2})-(\d{2})-(\d{2})/);
+      if (m1) {
+        const mm = parseInt(m1[2], 10) - 1;
+        const yy = (parseInt(m1[1], 10) % 100).toString().padStart(2, "0");
+        return `${names[mm]}-${yy}`;
+      }
+      const m2 = s.match(
+        /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[- ]?(\d{2,4})$/i
+      );
+      if (m2) {
+        const mon = m2[1].toUpperCase();
+        const yr = m2[2];
+        const y2 = (yr.length === 4 ? yr.slice(2) : yr).padStart(2, "0");
+        return `${mon}-${y2}`;
+      }
+      return null;
+    };
+
+    const totals = new Map<string, number>();
+
+    for (const ws of workbook.worksheets) {
+      const wsName = (ws.name || "").toUpperCase();
+      console.log(`\n📊 Processing sheet: ${ws.name}`);
+
+      // Skip loan deduction sheet
+      if (wsName.includes("LOAN")) {
+        console.log(`  ⏭️  Skipping loan sheet`);
+        continue;
+      }
+
+      // Find header row (contains "Sr.No." in column A)
+      let headerRowIndex = -1;
+      for (let r = 1; r <= Math.min(ws.rowCount, 15); r++) {
+        const cellA = String(ws.getRow(r).getCell(1).value || "").toUpperCase();
+        if (
+          cellA.includes("SR") &&
+          (cellA.includes("NO") || cellA.includes("."))
+        ) {
+          headerRowIndex = r;
+          console.log(`  ✓ Found header at row ${r}`);
+          break;
+        }
+      }
+
+      if (headerRowIndex === -1) {
+        console.log(`  ❌ No header row found`);
+        continue;
+      }
+
+      const header = ws.getRow(headerRowIndex);
+      const monthCols: Array<{ col: number; key: string }> = [];
+
+      // Scan all columns for month headers
+      console.log(`  🔍 Scanning for month columns...`);
+      for (let c = 1; c <= Math.min(ws.columnCount, 30); c++) {
+        const cellValue = header.getCell(c).value;
+        const key = toMonthKey(cellValue);
+
+        if (key) {
+          monthCols.push({ col: c, key });
+          console.log(`     Column ${c}: ${key} = "${cellValue}"`);
+        }
+      }
+
+      if (monthCols.length === 0) {
+        console.log(`  ❌ No month columns found`);
+        continue;
+      }
+
+      console.log(`  ✓ Found ${monthCols.length} month columns`);
+
+      // Find "Grand Total" row - check multiple columns
+      let grandTotalRowIndex = -1;
+      console.log(`  🔍 Searching for Grand Total row...`);
+
+      for (let r = headerRowIndex + 1; r <= ws.rowCount; r++) {
+        const row = ws.getRow(r);
+
+        // Check columns A through E for "Grand Total"
+        for (let c = 1; c <= 5; c++) {
+          const cellValue = String(row.getCell(c).value || "")
+            .trim()
+            .toUpperCase();
+          if (cellValue.includes("GRAND") && cellValue.includes("TOTAL")) {
+            grandTotalRowIndex = r;
+            console.log(
+              `  ✓ Found "Grand Total" at row ${r}, column ${c}: "${
+                row.getCell(c).value
+              }"`
+            );
+            break;
+          }
+        }
+
+        if (grandTotalRowIndex !== -1) break;
+      }
+
+      if (grandTotalRowIndex === -1) {
+        console.warn(`  ⚠️  No Grand Total row found in sheet ${ws.name}`);
+        continue;
+      }
+
+      // Extract totals from Grand Total row
+      const grandTotalRow = ws.getRow(grandTotalRowIndex);
+      console.log(`  📊 Extracting totals from row ${grandTotalRowIndex}:`);
+
+      for (const mc of monthCols) {
+        const cell = grandTotalRow.getCell(mc.col);
+        const raw = (cell as any).result ?? cell.value;
+        let n = 0;
+
+        if (typeof raw === "number") {
+          n = raw;
+        } else {
+          const parsed = Number(String(raw ?? "").replace(/[^0-9.-]/g, ""));
+          n = isFinite(parsed) ? parsed : 0;
+        }
+
+        if (n > 0) {
+          const existing = totals.get(mc.key) || 0;
+          totals.set(mc.key, existing + n);
+          console.log(
+            `     ${mc.key}: ${n.toLocaleString()} (cumulative: ${(
+              existing + n
+            ).toLocaleString()})`
+          );
+        } else {
+          console.log(`     ${mc.key}: 0 or empty`);
+        }
+      }
+    }
+
+    console.log(`\n✅ Final HR Monthly Totals:`);
+    totals.forEach((value, key) => {
+      console.log(`   ${key}: ₹${value.toLocaleString()}`);
+    });
+
+    return totals;
+  }
+
+  static async computeOurMonthlyTotals(
+    staffBuffer: ArrayBuffer,
+    workerBuffer: ArrayBuffer
+  ): Promise<Map<string, number>> {
+    const totals = new Map<string, number>();
+
+    console.log("\n📊 Computing OUR monthly totals...");
+
+    // Process Staff file (Column R = 18)
+    const staffWb = new ExcelJS.Workbook();
+    await staffWb.xlsx.load(staffBuffer);
+
+    for (const ws of staffWb.worksheets) {
+      if (!ws.name.includes("-") || !ws.name.endsWith(" O")) continue;
+
+      const monthKey = this.normalizeMonthKey(ws.name);
+      console.log(`\n  Processing Staff sheet: ${ws.name} -> ${monthKey}`);
+
+      let grandTotalFound = false;
+      let staffGross = 0;
+
+      // Look for the Grand Total row more comprehensively
+      for (
+        let rowNum = ws.rowCount;
+        rowNum > Math.max(1, ws.rowCount - 20);
+        rowNum--
+      ) {
+        const row = ws.getRow(rowNum);
+
+        // Check first few columns for "Grand Total" or just "Total"
+        for (let col = 1; col <= 5; col++) {
+          const cellValue = String(row.getCell(col).value || "")
+            .trim()
+            .toUpperCase();
+
+          if (
+            (cellValue.includes("GRAND") && cellValue.includes("TOTAL")) ||
+            (cellValue === "TOTAL" && !grandTotalFound)
+          ) {
+            // Get the value from Column R (18)
+            const cell = row.getCell(18);
+            const value = (cell as any).result ?? cell.value;
+            staffGross = toNumber(cell);
+
+            if (staffGross > 0) {
+              grandTotalFound = true;
+              console.log(
+                `    ✓ Found Staff Grand Total at row ${rowNum}: ₹${staffGross.toLocaleString()}`
+              );
+              totals.set(`STAFF_${monthKey}`, staffGross);
+              break;
+            }
+          }
+        }
+        if (grandTotalFound) break;
+      }
+
+      if (!grandTotalFound) {
+        console.log(`    ⚠️ No Grand Total found in Staff sheet ${ws.name}`);
+      }
+    }
+
+    // Process Worker file (Column I = 9)
+    const workerWb = new ExcelJS.Workbook();
+    await workerWb.xlsx.load(workerBuffer);
+
+    for (const ws of workerWb.worksheets) {
+      if (!ws.name.includes("-") || !ws.name.endsWith(" W")) continue;
+
+      const monthKey = this.normalizeMonthKey(ws.name);
+      console.log(`\n  Processing Worker sheet: ${ws.name} -> ${monthKey}`);
+
+      let grandTotalFound = false;
+      let workerGross = 0;
+
+      // Look for the Grand Total row
+      for (
+        let rowNum = ws.rowCount;
+        rowNum > Math.max(1, ws.rowCount - 20);
+        rowNum--
+      ) {
+        const row = ws.getRow(rowNum);
+
+        // Check first few columns for "Grand Total" or just "Total"
+        for (let col = 1; col <= 5; col++) {
+          const cellValue = String(row.getCell(col).value || "")
+            .trim()
+            .toUpperCase();
+
+          if (
+            (cellValue.includes("GRAND") && cellValue.includes("TOTAL")) ||
+            (cellValue === "TOTAL" && !grandTotalFound) ||
+            cellValue.includes("TOTAL")
+          ) {
+            // Get the value from Column I (9)
+            const cell = row.getCell(9);
+            const value = (cell as any).result ?? cell.value;
+            workerGross = toNumber(cell);
+
+            if (workerGross > 0) {
+              grandTotalFound = true;
+              console.log(
+                `    ✓ Found Worker Grand Total at row ${rowNum}: ₹${workerGross.toLocaleString()}`
+              );
+
+              // Add to existing staff total
+              const existing = totals.get(`STAFF_${monthKey}`) || 0;
+              const combined = existing + workerGross;
+              totals.set(monthKey, combined); // Final combined total
+              console.log(
+                `    📊 Combined total for ${monthKey}: ₹${combined.toLocaleString()}`
+              );
+              break;
+            }
+          }
+        }
+        if (grandTotalFound) break;
+      }
+
+      if (!grandTotalFound) {
+        console.log(`    ⚠️ No Grand Total found in Worker sheet ${ws.name}`);
+        // Still set the combined total even if worker total is 0
+        const existing = totals.get(`STAFF_${monthKey}`) || 0;
+        if (existing > 0) {
+          totals.set(monthKey, existing);
+        }
+      }
+    }
+
+    console.log("\n✅ Final OUR Monthly Totals:");
+    totals.forEach((value, key) => {
+      if (!key.startsWith("STAFF_")) {
+        console.log(`   ${key}: ₹${value.toLocaleString()}`);
+      }
+    });
+
+    return totals;
+  }
+
+  private static toMonthKey(value: string): string | null {
+    if (!value) return null;
+    const s = String(value).toUpperCase().trim();
+    const m =
+      s.match(/^([A-Z]+)\s*[-/]\s*(\d{2,4})/) ||
+      s.match(/^([A-Z]+)\s+(\d{2,4})/);
+    if (!m) return null;
+
+    const monthMap: Record<string, string> = {
+      JAN: "JAN",
+      JANUARY: "JAN",
+      FEB: "FEB",
+      FEBRUARY: "FEB",
+      MAR: "MAR",
+      MARCH: "MAR",
+      APR: "APR",
+      APRIL: "APR",
+      MAY: "MAY",
+      JUN: "JUN",
+      JUNE: "JUN",
+      JUL: "JUL",
+      JULY: "JUL",
+      AUG: "AUG",
+      AUGUST: "AUG",
+      SEP: "SEP",
+      SEPT: "SEP",
+      SEPTEMBER: "SEP",
+      OCT: "OCT",
+      OCTOBER: "OCT",
+      NOV: "NOV",
+      NOVEMBER: "NOV",
+      DEC: "DEC",
+      DECEMBER: "DEC",
+    };
+
+    const mon = monthMap[m[1]] || m[1].slice(0, 3);
+    const yr = m[2].length === 4 ? m[2].slice(2) : m[2];
+    return `${mon}-${yr}`;
+  }
+
+  static async computeHRGrossTotals(buffer: ArrayBuffer): Promise<{
+    hrMonthTotals: Record<string, number>;
+    hrYearTotals: Record<string, number>;
+    hrGrandTotal: number;
+  }> {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+
+      const hrMonthTotals: Record<string, number> = {};
+      const hrYearTotals: Record<string, number> = {};
+      let hrGrandTotal = 0;
+
+      ["Staff", "Worker"].forEach((sheetName) => {
+        const worksheet = workbook.getWorksheet(sheetName);
+        if (!worksheet) return;
+
+        // Find header row (assuming row 3 based on your structure)
+        const headerRow = worksheet.getRow(3);
+        const monthColumns: Array<{ col: number; month: string }> = [];
+        let grossSalaryCol = 0;
+
+        // Scan header to find month columns and Gross Salary column
+        headerRow.eachCell((cell, colNumber) => {
+          const cellValue = String(cell.value || "").trim();
+          const monthKey = this.toMonthKey(cellValue);
+
+          if (monthKey) {
+            monthColumns.push({ col: colNumber, month: monthKey });
+          }
+
+          // Find Gross Salary column (or similar)
+          if (
+            cellValue.toLowerCase().includes("gross") &&
+            (cellValue.toLowerCase().includes("salary") ||
+              cellValue.toLowerCase() === "gross")
+          ) {
+            grossSalaryCol = colNumber;
+          }
+        });
+
+        console.log(
+          `${sheetName}: Found ${monthColumns.length} month columns, Gross Salary at col ${grossSalaryCol}`
+        );
+
+        // Sum each month column
+        monthColumns.forEach(({ col, month }) => {
+          let monthSum = 0;
+          worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber <= 3) return; // Skip header rows
+            const value = toNumber(row.getCell(col));
+            if (value > 0) monthSum += value;
+          });
+
+          hrMonthTotals[month] = (hrMonthTotals[month] || 0) + monthSum;
+
+          // Add to year total
+          const year = month.split("-")[1];
+          hrYearTotals[`20${year}`] =
+            (hrYearTotals[`20${year}`] || 0) + monthSum;
+        });
+
+        // Sum Gross Salary column for grand total
+        if (grossSalaryCol > 0) {
+          worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber <= 3) return;
+            const value = toNumber(row.getCell(grossSalaryCol));
+            if (value > 0) hrGrandTotal += value;
+          });
+        }
+      });
+
+      console.log(
+        `✅ HR Totals - Months: ${
+          Object.keys(hrMonthTotals).length
+        }, Grand: ${hrGrandTotal}`
+      );
+      return { hrMonthTotals, hrYearTotals, hrGrandTotal };
+    } catch (error) {
+      console.error("❌ Error computing HR gross totals:", error);
+      return { hrMonthTotals: {}, hrYearTotals: {}, hrGrandTotal: 0 };
+    }
   }
 
   private static async generateSummarySheet(
     workbook: ExcelJS.Workbook,
-    departments: { [key: string]: BonusCalculation[] }
+    departments: { [key: string]: BonusCalculation[] },
+    hrMonthlyTotals?: Map<string, number>,
+    staffBuffer?: ArrayBuffer,
+    workerBuffer?: ArrayBuffer
   ): Promise<void> {
     const worksheet = workbook.addWorksheet("Summary");
-
     const title = "DEPARTMENT-WISE BONUS SUMMARY - DIWALI 2024-25";
 
+    // First section: Department-wise summary
     const headers = [
       "Department",
       "Employees",
@@ -994,7 +2263,6 @@ export class ExcelProcessor {
       "Average Bonus",
     ];
 
-    // Add title
     worksheet.mergeCells("A1:E1");
     const titleCell = worksheet.getCell("A1");
     titleCell.value = title;
@@ -1006,10 +2274,8 @@ export class ExcelProcessor {
     };
     titleCell.alignment = { horizontal: "center", vertical: "middle" };
 
-    // Add empty row
     worksheet.getRow(2).height = 15;
 
-    // Add headers
     const headerRow = worksheet.getRow(3);
     headers.forEach((header, index) => {
       const cell = headerRow.getCell(index + 1);
@@ -1065,19 +2331,12 @@ export class ExcelProcessor {
       rowData.forEach((value, colIndex) => {
         const cell = currentRow.getCell(colIndex + 1);
         cell.value = value;
-
-        if (colIndex === 0) {
-          // Department name - left aligned
+        if (colIndex === 0)
           cell.alignment = { horizontal: "left", vertical: "middle" };
-        } else if (colIndex >= 2) {
-          // Numeric columns
+        else if (colIndex >= 2) {
           cell.alignment = { horizontal: "right", vertical: "middle" };
           cell.numFmt = "#,##0.00";
-        } else {
-          // Employee count
-          cell.alignment = { horizontal: "center", vertical: "middle" };
-        }
-
+        } else cell.alignment = { horizontal: "center", vertical: "middle" };
         cell.border = {
           top: { style: "thin", color: { argb: "FFBBBBBB" } },
           bottom: { style: "thin", color: { argb: "FFBBBBBB" } },
@@ -1087,11 +2346,9 @@ export class ExcelProcessor {
       });
     });
 
-    // Add empty row
     const emptyRowIndex = rowIndex + Object.keys(departments).length;
     worksheet.getRow(emptyRowIndex).height = 15;
 
-    // Add grand totals
     const grandTotalRowIndex = emptyRowIndex + 1;
     const grandTotalRow = worksheet.getRow(grandTotalRowIndex);
     grandTotalRow.height = 40;
@@ -1113,14 +2370,271 @@ export class ExcelProcessor {
         pattern: "solid",
         fgColor: { argb: "FFE65100" },
       };
+      if (colIndex === 0)
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+      else if (colIndex >= 2) {
+        cell.alignment = { horizontal: "right", vertical: "middle" };
+        cell.numFmt = "#,##0.00";
+      } else cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = {
+        top: { style: "double", color: { argb: "FF000000" } },
+        bottom: { style: "double", color: { argb: "FF000000" } },
+        left: { style: "medium", color: { argb: "FF000000" } },
+        right: { style: "medium", color: { argb: "FF000000" } },
+      };
+    });
+
+    // NEW SECTION: Monthly Comparison
+    let currentRow = grandTotalRowIndex + 3;
+
+    // Monthly Comparison Title
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const monthTitleCell = worksheet.getCell(`A${currentRow}`);
+    monthTitleCell.value =
+      "MONTHLY GROSS SALARY COMPARISON (OUR SHEET vs HR SHEET)";
+    monthTitleCell.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+    monthTitleCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1565C0" },
+    };
+    monthTitleCell.alignment = { horizontal: "center", vertical: "middle" };
+    worksheet.getRow(currentRow).height = 35;
+    currentRow++;
+
+    worksheet.getRow(currentRow).height = 15;
+    currentRow++;
+
+    // Monthly Comparison Headers
+    const monthHeaders = [
+      "Month",
+      "Our Sheet Total",
+      "HR Sheet Total",
+      "Difference",
+    ];
+    const monthHeaderRow = worksheet.getRow(currentRow);
+    monthHeaders.forEach((header, index) => {
+      const cell = monthHeaderRow.getCell(index + 1);
+      cell.value = header;
+      cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF90CAF9" },
+      };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+    });
+    currentRow++;
+
+    // Calculate monthly totals from our calculations
+    const monthlyTotals =
+      staffBuffer && workerBuffer
+        ? await this.computeOurMonthlyTotals(staffBuffer, workerBuffer)
+        : new Map<string, number>();
+
+    const monthOrder = [
+      "NOV-24",
+      "DEC-24",
+      "JAN-25",
+      "FEB-25",
+      "MAR-25",
+      "APR-25",
+      "MAY-25",
+      "JUN-25",
+      "JUL-25",
+      "AUG-25",
+      "SEP-25",
+      "OCT-25",
+    ];
+
+    let ourYearTotal = 0;
+    let hrYearTotal = 0;
+
+    // Monthly data rows
+    monthOrder.forEach((month) => {
+      const ourTotal = Math.round(monthlyTotals.get(month) || 0);
+      const hrTotal = Math.round(hrMonthlyTotals?.get(month) || 0);
+      const difference = ourTotal - hrTotal;
+      ourYearTotal += ourTotal;
+      hrYearTotal += hrTotal;
+
+      const dataRow = worksheet.getRow(currentRow);
+      dataRow.height = 25;
+
+      const rowData = [month, ourTotal, hrTotal, difference];
+      rowData.forEach((value, colIndex) => {
+        const cell = dataRow.getCell(colIndex + 1);
+        cell.value = value;
+
+        if (colIndex === 0) {
+          cell.alignment = { horizontal: "center", vertical: "middle" };
+        } else {
+          cell.alignment = { horizontal: "right", vertical: "middle" };
+          cell.numFmt = "#,##0";
+        }
+
+        // Highlight difference in red if > 1
+        if (colIndex === 3 && Math.abs(difference) > 1) {
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFFF0000" },
+          };
+          cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        }
+
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFCCCCCC" } },
+          bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+          left: { style: "thin", color: { argb: "FFCCCCCC" } },
+          right: { style: "thin", color: { argb: "FFCCCCCC" } },
+        };
+      });
+      currentRow++;
+    });
+
+    // Yearwise Total Row
+    currentRow++;
+    const yearTotalRow = worksheet.getRow(currentRow);
+    yearTotalRow.height = 30;
+
+    const yearDifference = ourYearTotal - hrYearTotal;
+    const yearData = [
+      "YEAR TOTAL (NOV-OCT)",
+      ourYearTotal,
+      hrYearTotal,
+      yearDifference,
+    ];
+
+    yearData.forEach((value, colIndex) => {
+      const cell = yearTotalRow.getCell(colIndex + 1);
+      cell.value = value;
+      cell.font = { bold: true, size: 12 };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFD54F" },
+      };
 
       if (colIndex === 0) {
         cell.alignment = { horizontal: "center", vertical: "middle" };
-      } else if (colIndex >= 2) {
-        cell.alignment = { horizontal: "right", vertical: "middle" };
-        cell.numFmt = "#,##0.00";
       } else {
-        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.alignment = { horizontal: "right", vertical: "middle" };
+        cell.numFmt = "#,##0";
+      }
+
+      // Highlight year difference in red if > 1
+      if (colIndex === 3 && Math.abs(yearDifference) > 1) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF0000" },
+        };
+        cell.font = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
+      }
+
+      cell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+    });
+
+    // Grand Gross Total Comparison
+    currentRow += 3;
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const grandGrossTitleCell = worksheet.getCell(`A${currentRow}`);
+    grandGrossTitleCell.value = "GRAND GROSS SALARY COMPARISON";
+    grandGrossTitleCell.font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    grandGrossTitleCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE65100" },
+    };
+    grandGrossTitleCell.alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    worksheet.getRow(currentRow).height = 35;
+    currentRow++;
+
+    worksheet.getRow(currentRow).height = 15;
+    currentRow++;
+
+    const grandGrossHeaders = [
+      "Description",
+      "Our Sheet",
+      "HR Sheet",
+      "Difference",
+    ];
+    const grandGrossHeaderRow = worksheet.getRow(currentRow);
+    grandGrossHeaders.forEach((header, index) => {
+      const cell = grandGrossHeaderRow.getCell(index + 1);
+      cell.value = header;
+      cell.font = { bold: true, size: 12, color: { argb: "FF000000" } };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFCDD2" },
+      };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+    });
+    currentRow++;
+
+    const ourGrandTotal = Math.round(grandTotalSalary);
+    const hrGrandTotal = hrYearTotal;
+    const grandDifference = ourGrandTotal - hrGrandTotal;
+
+    const grandGrossRow = worksheet.getRow(currentRow);
+    grandGrossRow.height = 35;
+
+    const grandGrossData = [
+      "Grand Gross Total",
+      ourGrandTotal,
+      hrGrandTotal,
+      grandDifference,
+    ];
+    grandGrossData.forEach((value, colIndex) => {
+      const cell = grandGrossRow.getCell(colIndex + 1);
+      cell.value = value;
+      cell.font = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE65100" },
+      };
+
+      if (colIndex === 0) {
+        cell.alignment = { horizontal: "left", vertical: "middle" };
+      } else {
+        cell.alignment = { horizontal: "right", vertical: "middle" };
+        cell.numFmt = "#,##0";
+      }
+
+      // Highlight grand difference in red if > 1
+      if (colIndex === 3 && Math.abs(grandDifference) > 1) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF0000" },
+        };
       }
 
       cell.border = {
@@ -1131,16 +2645,15 @@ export class ExcelProcessor {
       };
     });
 
-    // Set column widths for summary
-    const summaryColWidths = [150, 100, 150, 130, 130];
+    // Set column widths
+    const summaryColWidths = [150, 150, 150, 150];
     summaryColWidths.forEach((width, index) => {
       worksheet.getColumn(index + 1).width = width / 7;
     });
 
-    // Set row heights
-    worksheet.getRow(1).height = 40; // Title row
-    worksheet.getRow(2).height = 15; // Empty row
-    worksheet.getRow(3).height = 35; // Header row
+    worksheet.getRow(1).height = 40;
+    worksheet.getRow(2).height = 15;
+    worksheet.getRow(3).height = 35;
   }
 
   static async generateComparisonReport(
@@ -1148,9 +2661,7 @@ export class ExcelProcessor {
   ): Promise<ArrayBuffer> {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet("Comparison Report");
-
     const title = "BONUS COMPARISON REPORT";
-
     const headers = [
       "EMP. ID",
       "Employee Name",
@@ -1161,7 +2672,6 @@ export class ExcelProcessor {
       "Status",
     ];
 
-    // Add title
     worksheet.mergeCells("A1:G1");
     const titleCell = worksheet.getCell("A1");
     titleCell.value = title;
@@ -1173,10 +2683,8 @@ export class ExcelProcessor {
     };
     titleCell.alignment = { horizontal: "center", vertical: "middle" };
 
-    // Add empty row
     worksheet.getRow(2).height = 15;
 
-    // Add headers
     const headerRow = worksheet.getRow(3);
     headers.forEach((header, index) => {
       const cell = headerRow.getCell(index + 1);
@@ -1196,7 +2704,6 @@ export class ExcelProcessor {
       };
     });
 
-    // Group by department
     const groupedComparisons = comparisons.reduce((acc, comp) => {
       const dept = comp.department || "Unknown";
       if (!acc[dept]) acc[dept] = [];
@@ -1207,7 +2714,6 @@ export class ExcelProcessor {
     let currentRow = 4;
 
     Object.keys(groupedComparisons).forEach((dept) => {
-      // Add department header
       const deptHeaderRow = worksheet.getRow(currentRow);
       deptHeaderRow.getCell(1).value = `DEPARTMENT: ${dept}`;
       deptHeaderRow.getCell(1).font = { bold: true, size: 12 };
@@ -1222,7 +2728,6 @@ export class ExcelProcessor {
       groupedComparisons[dept].forEach((comp: any) => {
         const dataRow = worksheet.getRow(currentRow);
         dataRow.height = 25;
-
         const rowData = [
           comp.empId,
           comp.name,
@@ -1232,7 +2737,6 @@ export class ExcelProcessor {
           comp.difference,
           comp.status,
         ];
-
         rowData.forEach((value, colIndex) => {
           const cell = dataRow.getCell(colIndex + 1);
           cell.value = value;
@@ -1246,85 +2750,54 @@ export class ExcelProcessor {
         });
         currentRow++;
       });
-
-      currentRow++; // Empty row between departments
+      currentRow++;
     });
 
-    // Set column widths for comparison report
     const compColWidths = [80, 200, 100, 120, 120, 120, 100];
     compColWidths.forEach((width, index) => {
       worksheet.getColumn(index + 1).width = width / 7;
     });
 
-    // Set row heights
-    worksheet.getRow(1).height = 35; // Title
-    worksheet.getRow(2).height = 15; // Empty
-    worksheet.getRow(3).height = 30; // Header
+    worksheet.getRow(1).height = 35;
+    worksheet.getRow(2).height = 15;
+    worksheet.getRow(3).height = 30;
 
     return await workbook.xlsx.writeBuffer();
   }
 
   private static parseDate(dateValue: any): Date {
-    if (!dateValue) return new Date("2020-01-01");
+    // Handle null, undefined, or empty strings as invalid, return default date
+    const s = String(dateValue ?? "")
+      .trim()
+      .toUpperCase();
+    if (!dateValue || s === "N" || s === "NA" || s === "N.A" || s === "N/A") {
+      console.warn(
+        `⚠️ Could not parse date: ${dateValue}, using default 2020-01-01`
+      );
+      return new Date("2020-01-01");
+    }
 
+    // If already a Date object, return it
     if (dateValue instanceof Date) return dateValue;
 
-    // Handle Excel date numbers
-    if (typeof dateValue === "number") {
-      return new Date((dateValue - 25569) * 86400 * 1000);
+    // Handle Excel serial number
+    const n = Number(String(dateValue).trim());
+    if (typeof dateValue === "number" && isFinite(n) && n > 0) {
+      const ms = Math.round((n - 25569) * 86400 * 1000);
+      const parsedDate = new Date(ms);
+      if (!isNaN(parsedDate.getTime())) return parsedDate;
     }
 
-    // Handle string dates
-    if (typeof dateValue === "string") {
-      const dateStr = dateValue.toString().trim();
+    // Handle string dates (ISO, dd-mm-yyyy, mm-dd-yyyy, etc.) using native Date constructor
+    const parsedDate = new Date(String(dateValue));
+    if (!isNaN(parsedDate.getTime())) return parsedDate;
 
-      // Common date formats
-      const formats = [
-        /^(\d{2})\.(\d{2})\.(\d{2})$/, // DD.MM.YY
-        /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/, // D.M.YYYY
-        /^(\d{4})-(\d{2})-(\d{2})$/, // YYYY-MM-DD
-        /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, // M/D/YYYY
-      ];
-
-      for (const format of formats) {
-        const match = dateStr.match(format);
-        if (match) {
-          if (format === formats[0]) {
-            // DD.MM.YY
-            const day = parseInt(match[1]);
-            const month = parseInt(match[2]) - 1;
-            const year = parseInt(match[3]) + 2000;
-            return new Date(year, month, day);
-          } else if (format === formats[1]) {
-            // D.M.YYYY
-            const day = parseInt(match[1]);
-            const month = parseInt(match[2]) - 1;
-            const year = parseInt(match[3]);
-            return new Date(year, month, day);
-          } else if (format === formats[2]) {
-            // YYYY-MM-DD
-            return new Date(dateStr);
-          } else if (format === formats[3]) {
-            // M/D/YYYY
-            const month = parseInt(match[1]) - 1;
-            const day = parseInt(match[2]);
-            const year = parseInt(match[3]);
-            return new Date(year, month, day);
-          }
-        }
-      }
-
-      // Try direct parsing as last resort
-      const parsedDate = new Date(dateStr);
-      if (!isNaN(parsedDate.getTime())) {
-        return parsedDate;
-      }
-    }
-
+    // If parsing fails, return default date with warning
+    console.warn(
+      `⚠️ Could not parse date: ${dateValue}, using default 2020-01-01`
+    );
     return new Date("2020-01-01");
   }
-
-  // Add these new methods at the end of the ExcelProcessor class
 
   static calculateStaffSummary(employees: Employee[]) {
     const monthlySummary: {
@@ -1334,7 +2807,6 @@ export class ExcelProcessor {
         count: number;
       };
     } = {};
-
     let totalGrossSalary = 0;
     let totalSalary1 = 0;
 
@@ -1348,22 +2820,17 @@ export class ExcelProcessor {
               count: 0,
             };
           }
-
-          // For staff: salary is from SALARY1 column (Column O)
           const salary1 = monthData.salary || 0;
-          const grossSalary = salary1; // Staff uses SALARY1 as gross salary
-
+          const grossSalary = salary1;
           monthlySummary[monthData.month].totalSalary1 += salary1;
           monthlySummary[monthData.month].totalGrossSalary += grossSalary;
           monthlySummary[monthData.month].count++;
-
           totalSalary1 += salary1;
           totalGrossSalary += grossSalary;
         });
       }
     });
 
-    // Sort months chronologically
     const sortedMonths = Object.keys(monthlySummary).sort();
     const sortedMonthlySummary: {
       [month: string]: {
@@ -1372,7 +2839,6 @@ export class ExcelProcessor {
         count: number;
       };
     } = {};
-
     sortedMonths.forEach((month) => {
       sortedMonthlySummary[month] = monthlySummary[month];
     });
@@ -1400,7 +2866,6 @@ export class ExcelProcessor {
         count: number;
       };
     } = {};
-
     let totalGrossSalary = 0;
     let totalSalary1 = 0;
 
@@ -1414,22 +2879,17 @@ export class ExcelProcessor {
               count: 0,
             };
           }
-
-          // For workers: salary is from Salary1 column (Column I)
           const salary1 = monthData.salary || 0;
-          const grossSalary = salary1; // Workers use Salary1 as gross salary
-
+          const grossSalary = salary1;
           monthlySummary[monthData.month].totalSalary1 += salary1;
           monthlySummary[monthData.month].totalGrossSalary += grossSalary;
           monthlySummary[monthData.month].count++;
-
           totalSalary1 += salary1;
           totalGrossSalary += grossSalary;
         });
       }
     });
 
-    // Sort months chronologically
     const sortedMonths = Object.keys(monthlySummary).sort();
     const sortedMonthlySummary: {
       [month: string]: {
@@ -1438,7 +2898,6 @@ export class ExcelProcessor {
         count: number;
       };
     } = {};
-
     sortedMonths.forEach((month) => {
       sortedMonthlySummary[month] = monthlySummary[month];
     });
@@ -1464,10 +2923,8 @@ export class ExcelProcessor {
     workerSummary: any
   ): Promise<void> {
     const worksheet = workbook.addWorksheet("Salary Summary");
-
     const title = "MONTHLY SALARY SUMMARY - DIWALI 2024-25";
 
-    // Add title
     worksheet.mergeCells("A1:F1");
     const titleCell = worksheet.getCell("A1");
     titleCell.value = title;
@@ -1478,13 +2935,10 @@ export class ExcelProcessor {
       fgColor: { argb: "FF2E7D32" },
     };
     titleCell.alignment = { horizontal: "center", vertical: "middle" };
-
-    // Add empty row
     worksheet.getRow(2).height = 15;
 
     let currentRow = 3;
 
-    // STAFF SUMMARY SECTION
     const staffHeaderRow = worksheet.getRow(currentRow);
     staffHeaderRow.getCell(1).value = "STAFF MONTHLY SUMMARY";
     staffHeaderRow.getCell(1).font = { bold: true, size: 14 };
@@ -1496,7 +2950,6 @@ export class ExcelProcessor {
     worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
     currentRow++;
 
-    // Staff table headers
     const staffHeaders = [
       "Month",
       "Total Gross Salary",
@@ -1525,15 +2978,12 @@ export class ExcelProcessor {
     });
     currentRow++;
 
-    // Staff monthly data
-    let staffTotalGross = 0;
-    let staffTotalSalary1 = 0;
-    let staffTotalEmployees = 0;
-
+    let staffTotalGross = 0,
+      staffTotalSalary1 = 0,
+      staffTotalEmployees = 0;
     Object.keys(staffSummary.monthlySummary).forEach((month) => {
       const monthData = staffSummary.monthlySummary[month];
       const dataRow = worksheet.getRow(currentRow);
-
       staffTotalGross += monthData.totalGrossSalary;
       staffTotalSalary1 += monthData.totalSalary1;
       staffTotalEmployees = Math.max(staffTotalEmployees, monthData.count);
@@ -1548,20 +2998,14 @@ export class ExcelProcessor {
           : 0,
         "",
       ];
-
       rowData.forEach((value, colIndex) => {
         const cell = dataRow.getCell(colIndex + 1);
         cell.value = value;
-        if (colIndex === 0) {
-          // Month column
+        if (colIndex === 0)
           cell.alignment = { horizontal: "center", vertical: "middle" };
-        } else if (colIndex >= 1 && colIndex <= 4) {
-          // Numeric columns
+        else if (colIndex >= 1 && colIndex <= 4) {
           cell.alignment = { horizontal: "right", vertical: "middle" };
-          if (colIndex >= 1 && colIndex <= 2) {
-            // Currency columns
-            cell.numFmt = "₹#,##0";
-          }
+          if (colIndex >= 1 && colIndex <= 2) cell.numFmt = "₹#,##0";
         }
         cell.border = {
           top: { style: "thin", color: { argb: "FFCCCCCC" } },
@@ -1573,7 +3017,6 @@ export class ExcelProcessor {
       currentRow++;
     });
 
-    // Staff total row
     const staffTotalRow = worksheet.getRow(currentRow);
     const staffTotalData = [
       "TOTAL (STAFF)",
@@ -1585,7 +3028,6 @@ export class ExcelProcessor {
         : 0,
       "",
     ];
-
     staffTotalData.forEach((value, colIndex) => {
       const cell = staffTotalRow.getCell(colIndex + 1);
       cell.value = value;
@@ -1595,13 +3037,11 @@ export class ExcelProcessor {
         pattern: "solid",
         fgColor: { argb: "FFFFF59D" },
       };
-      if (colIndex === 0) {
+      if (colIndex === 0)
         cell.alignment = { horizontal: "center", vertical: "middle" };
-      } else if (colIndex >= 1 && colIndex <= 4) {
+      else if (colIndex >= 1 && colIndex <= 4) {
         cell.alignment = { horizontal: "right", vertical: "middle" };
-        if (colIndex >= 1 && colIndex <= 2) {
-          cell.numFmt = "₹#,##0";
-        }
+        if (colIndex >= 1 && colIndex <= 2) cell.numFmt = "₹#,##0";
       }
       cell.border = {
         top: { style: "medium", color: { argb: "FF000000" } },
@@ -1610,9 +3050,8 @@ export class ExcelProcessor {
         right: { style: "thin", color: { argb: "FF000000" } },
       };
     });
-    currentRow += 2; // Empty row
+    currentRow += 2;
 
-    // WORKER SUMMARY SECTION
     const workerHeaderRow = worksheet.getRow(currentRow);
     workerHeaderRow.getCell(1).value = "WORKER MONTHLY SUMMARY";
     workerHeaderRow.getCell(1).font = { bold: true, size: 14 };
@@ -1624,7 +3063,6 @@ export class ExcelProcessor {
     worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
     currentRow++;
 
-    // Worker table headers
     const workerHeaders = [
       "Month",
       "Total Gross Salary",
@@ -1653,15 +3091,12 @@ export class ExcelProcessor {
     });
     currentRow++;
 
-    // Worker monthly data
-    let workerTotalGross = 0;
-    let workerTotalSalary1 = 0;
-    let workerTotalEmployees = 0;
-
+    let workerTotalGross = 0,
+      workerTotalSalary1 = 0,
+      workerTotalEmployees = 0;
     Object.keys(workerSummary.monthlySummary).forEach((month) => {
       const monthData = workerSummary.monthlySummary[month];
       const dataRow = worksheet.getRow(currentRow);
-
       workerTotalGross += monthData.totalGrossSalary;
       workerTotalSalary1 += monthData.totalSalary1;
       workerTotalEmployees = Math.max(workerTotalEmployees, monthData.count);
@@ -1676,20 +3111,14 @@ export class ExcelProcessor {
           : 0,
         "",
       ];
-
       rowData.forEach((value, colIndex) => {
         const cell = dataRow.getCell(colIndex + 1);
         cell.value = value;
-        if (colIndex === 0) {
-          // Month column
+        if (colIndex === 0)
           cell.alignment = { horizontal: "center", vertical: "middle" };
-        } else if (colIndex >= 1 && colIndex <= 4) {
-          // Numeric columns
+        else if (colIndex >= 1 && colIndex <= 4) {
           cell.alignment = { horizontal: "right", vertical: "middle" };
-          if (colIndex >= 1 && colIndex <= 2) {
-            // Currency columns
-            cell.numFmt = "₹#,##0";
-          }
+          if (colIndex >= 1 && colIndex <= 2) cell.numFmt = "₹#,##0";
         }
         cell.border = {
           top: { style: "thin", color: { argb: "FFCCCCCC" } },
@@ -1701,7 +3130,6 @@ export class ExcelProcessor {
       currentRow++;
     });
 
-    // Worker total row
     const workerTotalRow = worksheet.getRow(currentRow);
     const workerTotalData = [
       "TOTAL (WORKER)",
@@ -1713,7 +3141,6 @@ export class ExcelProcessor {
         : 0,
       "",
     ];
-
     workerTotalData.forEach((value, colIndex) => {
       const cell = workerTotalRow.getCell(colIndex + 1);
       cell.value = value;
@@ -1723,13 +3150,11 @@ export class ExcelProcessor {
         pattern: "solid",
         fgColor: { argb: "FFFFF59D" },
       };
-      if (colIndex === 0) {
+      if (colIndex === 0)
         cell.alignment = { horizontal: "center", vertical: "middle" };
-      } else if (colIndex >= 1 && colIndex <= 4) {
+      else if (colIndex >= 1 && colIndex <= 4) {
         cell.alignment = { horizontal: "right", vertical: "middle" };
-        if (colIndex >= 1 && colIndex <= 2) {
-          cell.numFmt = "₹#,##0";
-        }
+        if (colIndex >= 1 && colIndex <= 2) cell.numFmt = "₹#,##0";
       }
       cell.border = {
         top: { style: "medium", color: { argb: "FF000000" } },
@@ -1740,7 +3165,6 @@ export class ExcelProcessor {
     });
     currentRow += 2;
 
-    // GRAND TOTAL ROW
     const grandTotalRow = worksheet.getRow(currentRow);
     const grandTotalData = [
       "GRAND TOTAL",
@@ -1755,7 +3179,6 @@ export class ExcelProcessor {
         : 0,
       "",
     ];
-
     grandTotalData.forEach((value, colIndex) => {
       const cell = grandTotalRow.getCell(colIndex + 1);
       cell.value = value;
@@ -1765,13 +3188,11 @@ export class ExcelProcessor {
         pattern: "solid",
         fgColor: { argb: "FFE65100" },
       };
-      if (colIndex === 0) {
+      if (colIndex === 0)
         cell.alignment = { horizontal: "center", vertical: "middle" };
-      } else if (colIndex >= 1 && colIndex <= 4) {
+      else if (colIndex >= 1 && colIndex <= 4) {
         cell.alignment = { horizontal: "right", vertical: "middle" };
-        if (colIndex >= 1 && colIndex <= 2) {
-          cell.numFmt = "₹#,##0";
-        }
+        if (colIndex >= 1 && colIndex <= 2) cell.numFmt = "₹#,##0";
       }
       cell.border = {
         top: { style: "double", color: { argb: "FF000000" } },
@@ -1781,14 +3202,12 @@ export class ExcelProcessor {
       };
     });
 
-    // Set column widths
     const colWidths = [120, 150, 150, 120, 120, 50];
     colWidths.forEach((width, index) => {
       worksheet.getColumn(index + 1).width = width / 7;
     });
 
-    // Set row heights
-    worksheet.getRow(1).height = 35; // Title row
-    worksheet.getRow(2).height = 15; // Empty row
+    worksheet.getRow(1).height = 35;
+    worksheet.getRow(2).height = 15;
   }
 }

@@ -13,32 +13,59 @@ export interface Employee {
   bonusAmount?: number;
   bonusPercent?: number;
   serviceMultiplier?: number;
+   isCashSalary?: boolean;
 }
+
 
 export interface MonthlyData {
   month: string;
   salary: number;
+   department?: string;
 }
 
 export interface BonusCalculation {
   empId: string;
   name: string;
-  department?: string; // Added department field
+  department: string;
   doj: Date;
-  monthlyData: MonthlyData[];
-  totalGrossSalary: number;
   serviceMonths: number;
+  
+  // Monthly salary breakdown (NOV-24 to SEP-25)
+  monthlySalaries: (number | null)[];
+  octSalary: number;
+  
+  // Gross calculations
+  totalGrossSalary: number;
+  gross2: number;
+  register: number;
+  
+  // Due Voucher data
+  alreadyPaid: number;
+  unpaid: number;
+  
+  // Eligibility
+  isEligible: boolean;
+  
+  // Final calculations
+  afterV: number;
   bonusPercent: number;
+  actual: number;
+  reim: number;
+   loan: number;
+  finalRTGS: number;
+  isCashSalary?: boolean;
+  
+  // Backward compatibility
   calculatedBonus: number;
   finalBonus: number;
-  isEligible: boolean;
   serviceMultiplier: number;
+  monthlyData: MonthlyData[];
 }
 
 export interface ComparisonResult {
   empId: string;
   name: string;
-  department: string; // Added department field
+  department: string;
   systemBonus: number;
   hrBonus: number;
   difference: number;
@@ -46,14 +73,19 @@ export interface ComparisonResult {
 }
 
 export interface UploadedFiles {
-  staff?: File;
-  worker?: File;
+  staffTulsi?: File;
+  workerTulsi?: File;
+  dueVoucher?: File;
+  bonusSummary?: File;
+  actualPercentage?: File;
+  monthWise?: File;
+  loanDeduction?: File;
   hrComparison?: File;
 }
 
 export interface DashboardData {
-  staffData: Employee[];
-  workerData: Employee[];
+  staffData?: Employee[];
+  workerData?: Employee[];
   bonusCalculations: BonusCalculation[];
   comparisonResults?: ComparisonResult[];
   summary: {
@@ -66,6 +98,8 @@ export interface DashboardData {
       totalBonus: number;
     }};
   };
+  salarySummaries?: {
+    staff: any;
+    worker: any;
+  };
 }
-
-

@@ -1,18 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  Download,
-  RefreshCw,
-  LogOut,
-  Users,
-  Building,
-  Search,
-  BarChart3,
-  Info,
-  IndianRupee,
-  TrendingUp,
-} from "lucide-react";
+import { Download, RefreshCw, LogOut, Building, Search } from "lucide-react";
 import FileUpload from "./FileUpload";
 import SummaryCards from "@/components/SummaryCards";
 import DataTable from "./DataTable";
@@ -42,6 +31,9 @@ interface MonthlyData {
 }
 
 interface DashboardData {
+  hrFileBase64?: string | null;
+  staffFileBase64?: string; // ADD THIS
+  workerFileBase64?: string; // ADD THIS
   bonusCalculations?: any[];
   comparisonResults?: any;
   summary?: any;
@@ -114,8 +106,14 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
     try {
       const formData = new FormData();
-      if (files.staff) formData.append("staff", files.staff);
-      if (files.worker) formData.append("worker", files.worker);
+      // ✅ FIXED: Use correct field names
+      if (files.staffTulsi) formData.append("staffTulsi", files.staffTulsi);
+      if (files.workerTulsi) formData.append("workerTulsi", files.workerTulsi);
+      if (files.dueVoucher) formData.append("dueVoucher", files.dueVoucher);
+      if (files.loanDeduction)
+        formData.append("loanDeduction", files.loanDeduction);
+      if (files.actualPercentage)
+        formData.append("actualPercentage", files.actualPercentage);
       if (files.hrComparison)
         formData.append("hrComparison", files.hrComparison);
 
@@ -139,7 +137,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
           // Merge the monthly summary data with the existing data
           setDashboardData({
             ...data,
-            ...monthlySummary, // This includes staff, worker, and combined monthly data
+            ...monthlySummary,
           });
         } else {
           const error = await monthlySummaryResponse.json();
@@ -168,6 +166,9 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           calculations: dashboardData?.bonusCalculations,
+          hrFileBase64: dashboardData?.hrFileBase64,
+          staffFileBase64: dashboardData?.staffFileBase64, // ADD THIS
+          workerFileBase64: dashboardData?.workerFileBase64, // ADD THIS
         }),
       });
 
@@ -289,27 +290,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
       {dashboardData && (
         <>
-          <div className="mb-6 flex justify-between items-center flex-wrap gap-4">
-            <div className="flex space-x-2">
-              <button
-                onClick={() => setShowMonthlyDashboard(!showMonthlyDashboard)}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 text-sm font-medium transition-colors"
-              >
-                <BarChart3 className="h-5 w-5" />
-                <span>
-                  {showMonthlyDashboard ? "Hide" : "Show"} Monthly Analysis
-                </span>
-              </button>
-              <button
-                onClick={() => setShowSummaryCards(!showSummaryCards)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 text-sm font-medium transition-colors"
-              >
-                <Info className="h-5 w-5" />
-                <span>{showSummaryCards ? "Hide" : "Show"} Summary Cards</span>
-              </button>
-            </div>
-          </div>
-
           {showSummaryCards && <SummaryCards summary={dashboardData.summary} />}
 
           {showMonthlyDashboard && dashboardData.combined?.chartData && (
@@ -341,181 +321,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
                     </div>
                   )
                 )}
-              </div>
-            </div>
-          )}
-
-          {/* Enhanced Salary Totals Section */}
-          {dashboardData.combined?.summary && (
-            <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-lg shadow-sm border border-blue-100">
-              <h3 className="text-base font-bold mb-4 flex items-center text-gray-800">
-                <IndianRupee className="h-6 w-6 mr-3 text-blue-600" />
-                Overall Salary Summary
-              </h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Total Gross Salary - All Months */}
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">
-                        Total Gross Salary
-                      </p>
-                      <p className="text-xs text-blue-600 mb-1">
-                        ({dashboardData.combined.summary.totalMonths} months
-                        combined)
-                      </p>
-                      <p className="text-base font-bold text-blue-700">
-                        {formatCurrency(
-                          dashboardData.combined.summary
-                            .totalGrossSalaryAllMonths
-                        )}
-                      </p>
-                    </div>
-                    <TrendingUp className="h-8 w-8 text-blue-500" />
-                  </div>
-                </div>
-
-                {/* Total Salary1 - All Months */}
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-green-500">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">
-                        Total Salary1 (Net)
-                      </p>
-                      <p className="text-xs text-green-600 mb-1">
-                        ({dashboardData.combined.summary.totalMonths} months
-                        combined)
-                      </p>
-                      <p className="text-base font-bold text-green-700">
-                        {formatCurrency(
-                          dashboardData.combined.summary.totalSalary1AllMonths
-                        )}
-                      </p>
-                    </div>
-                    <IndianRupee className="h-8 w-8 text-green-500" />
-                  </div>
-                </div>
-
-                {/* Average Monthly Gross */}
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-purple-500">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">
-                        Average Monthly Gross
-                      </p>
-                      <p className="text-xs text-purple-600 mb-1">
-                        Per month average
-                      </p>
-                      <p className="text-base font-bold text-purple-700">
-                        {formatCurrency(
-                          dashboardData.combined.summary
-                            .totalGrossSalaryAllMonths /
-                            dashboardData.combined.summary.totalMonths
-                        )}
-                      </p>
-                    </div>
-                    <BarChart3 className="h-8 w-8 text-purple-500" />
-                  </div>
-                </div>
-
-                {/* Average Monthly Net */}
-                <div className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-teal-500">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">
-                        Average Monthly Net
-                      </p>
-                      <p className="text-xs text-teal-600 mb-1">
-                        Per month average
-                      </p>
-                      <p className="text-base font-bold text-teal-700">
-                        {formatCurrency(
-                          dashboardData.combined.summary.totalSalary1AllMonths /
-                            dashboardData.combined.summary.totalMonths
-                        )}
-                      </p>
-                    </div>
-                    <Users className="h-8 w-8 text-teal-500" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Month-wise breakdown toggle */}
-              <div className="mt-4">
-                <button
-                  onClick={() => setShowMonthlyBreakdown(!showMonthlyBreakdown)}
-                  className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center"
-                >
-                  {showMonthlyBreakdown ? "Hide" : "Show"} Month-wise Breakdown
-                  <span className="ml-1">
-                    {showMonthlyBreakdown ? "▲" : "▼"}
-                  </span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Month-wise Breakdown Table */}
-          {showMonthlyBreakdown && dashboardData.combined?.monthlyData && (
-            <div className="mb-6 bg-white rounded-lg shadow-sm overflow-hidden">
-              <div className="px-6 py-4 bg-gray-50 border-b">
-                <h4 className="text-lg font-semibold text-gray-800">
-                  Month-wise Salary Breakdown
-                </h4>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Month
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Employees
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Total Gross Salary
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Total Salary1
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Avg Gross/Employee
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Working Days
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {dashboardData.combined.monthlyData.map((month, index) => (
-                      <tr
-                        key={month.month}
-                        className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}
-                      >
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {month.month}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {month.totalEmployees}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-green-600 font-medium">
-                          {formatCurrency(month.totalGrossSalary)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-600 font-medium">
-                          {formatCurrency(month.totalSalary1)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {formatCurrency(month.avgGrossSalary)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {month.totalWorkingDays}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
             </div>
           )}
